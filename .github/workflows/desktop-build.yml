@@ -78,7 +78,7 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri build -- --target ${{ matrix.rust-target }}
+        run: npm run tauri:build -- --target ${{ matrix.rust-target }}
 
       - name: Upload installers
         uses: actions/upload-artifact@v4

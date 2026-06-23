@@ -13,6 +13,7 @@
     "tauri:prepare": "node scripts/tauri-prepare-out.mjs",
     "tauri:prepare:win": "node scripts/tauri-prepare-out.mjs",
     "seed:plans": "node scripts/seed-plans.js",
+    "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:build:win": "npm run tauri:prepare:win && tauri build",
