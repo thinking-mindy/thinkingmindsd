@@ -1,0 +1,45 @@
+{
+  "sections": [
+    {
+      "id": "main",
+      "title": "Main",
+      "items": [
+        { "id": "dashboard", "title": "Dashboard", "path": "/dashboard", "enabled": true },
+        { "id": "pos", "title": "POS", "path": "/pos", "enabled": true },
+        { "id": "cashier", "title": "Cashier", "path": "/cashier", "enabled": true },
+        { "id": "finance", "title": "Finance & Accounting", "path": "/finance", "enabled": true },
+        { "id": "inventory", "title": "Inventory", "path": "/inventory", "enabled": true },
+        { "id": "procurement", "title": "Procurement", "path": "/procurement", "enabled": true },
+        { "id": "hr", "title": "HR & Payroll", "path": "/hr", "enabled": true }
+      ]
+    },
+    {
+      "id": "operations",
+      "title": "Operations",
+      "items": [
+        { "id": "tasks", "title": "Projects & Tasks", "path": "/tasks", "enabled": true },
+        { "id": "crm", "title": "CRM & Clients", "path": "/crm", "enabled": true },
+        { "id": "it", "title": "IT & Systems", "path": "/it", "enabled": true },
+        { "id": "helpdesk", "title": "Helpdesk & Support", "path": "/helpdesk", "enabled": true }
+      ]
+    },
+    {
+      "id": "financeExtensions",
+      "title": "Finance Extensions",
+      "items": [
+        { "id": "currency", "title": "Multi-Currency", "path": "/currency", "enabled": true },
+        { "id": "audit", "title": "Audit & Compliance", "path": "/audit", "enabled": true }
+      ]
+    },
+    {
+      "id": "system",
+      "title": "System",
+      "items": [
+        { "id": "admin", "title": "Administration Panel", "path": "/admin", "enabled": true },
+        { "id": "plan", "title": "Renew licence", "path": "/renew-licence", "enabled": true },
+        { "id": "reports", "title": "Reports & Analytics", "path": "/reports", "enabled": true }
+      ]
+    }
+  ]
+}
+

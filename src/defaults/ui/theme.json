@@ -1,0 +1,17 @@
+{
+  "brand": {
+    "name": "Thinking Minds",
+    "logoUrl": "/logo.png"
+  },
+  "palette": {
+    "primary": "#0AA775",
+    "secondary": "#1976d2"
+  },
+  "shape": {
+    "borderRadius": 12
+  },
+  "typography": {
+    "fontFamily": "Inter, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Arial, sans-serif"
+  }
+}
+
