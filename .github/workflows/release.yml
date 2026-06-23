@@ -101,6 +101,6 @@ jobs:
             | Linux | `.deb` and `.AppImage` |
             | Windows | `.exe` (NSIS installer) |
             | macOS | `.dmg` |
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.tauri-args }}
