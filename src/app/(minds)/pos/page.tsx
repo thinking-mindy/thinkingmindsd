@@ -27,6 +27,7 @@ import OrderHistory from "./components/OrderHistory";
 import RegisterDialog from "./components/RegisterDialog";
 import FiscalSettingsDialog from "./components/FiscalSettingsDialog";
 import { getAllInventoryItems } from "@/lib/desktop/inventory-bridge";
+import { normalizeDocumentId } from "@/lib/document-id";
 
 const SearchContainer = styled(Paper)(({ theme }) => ({
   display: "flex",
@@ -151,78 +152,65 @@ export default function POSPage() {
   const [search, setSearch] = useState<string>("");
   const [sidebarMinimized, setSidebarMinimized] = useState(false);
 
-  // Fetch inventory items from database and use them as POS items
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const itemsRes = await getAllInventoryItems();
+  const loadInventoryProducts = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const itemsRes = await getAllInventoryItems();
 
-        console.log('Inventory items response:', itemsRes);
+      if (itemsRes.success && itemsRes.data) {
+        const sellableItems = itemsRes.data.filter((item: any) =>
+          item.price && item.price > 0
+        );
 
-        if (itemsRes.success && itemsRes.data) {
-          // Filter items that have a price (only sellable items)
-          const sellableItems = itemsRes.data.filter((item: any) =>
-            item.price && item.price > 0
-          );
+        const locationMap = new Map<string, { id: string; title: string; itemsCount: number }>();
+        locationMap.set('all', { id: 'all', title: 'All Items', itemsCount: sellableItems.length });
 
-          // Extract unique locations from inventory items
-          const locationMap = new Map<string, { id: string; title: string; itemsCount: number }>();
-
-          // Add "All Items" location tab
-          locationMap.set('all', { id: 'all', title: 'All Items', itemsCount: sellableItems.length });
-
-          sellableItems.forEach((item: any) => {
-            const locName = item.location || 'No location';
-            if (!locationMap.has(locName)) {
-              locationMap.set(locName, { id: locName, title: locName, itemsCount: 0 });
-            }
-            locationMap.get(locName)!.itemsCount++;
-          });
-
-          // Convert map to array and set categories state (used for location tabs)
-          const locs = Array.from(locationMap.values()).sort((a, b) => {
-            if (a.id === 'all') return -1;
-            if (b.id === 'all') return 1;
-            if (b.itemsCount !== a.itemsCount) return b.itemsCount - a.itemsCount;
-            return a.title.localeCompare(b.title);
-          });
-          setCategories(locs);
-
-          // Set default to "All Items" if none selected
-          if (locs.length > 0 && !selectedCategory) {
-            setSelectedCategory('all');
+        sellableItems.forEach((item: any) => {
+          const locName = item.location || 'No location';
+          if (!locationMap.has(locName)) {
+            locationMap.set(locName, { id: locName, title: locName, itemsCount: 0 });
           }
+          locationMap.get(locName)!.itemsCount++;
+        });
 
-          // Map inventory items to menu items (categoryId used for location filter)
-          const items = sellableItems.map((item: any) => ({
-            id: item._id.toString(),
-            name: item.name,
-            price: item.price || 0,
-            img: item.imageUrl || "",
-            categoryId: item.location || 'No location',
-            sku: item.sku,
-            quantity: item.quantity || 0,
-          }));
+        const locs = Array.from(locationMap.values()).sort((a, b) => {
+          if (a.id === 'all') return -1;
+          if (b.id === 'all') return 1;
+          if (b.itemsCount !== a.itemsCount) return b.itemsCount - a.itemsCount;
+          return a.title.localeCompare(b.title);
+        });
+        setCategories(locs);
 
-          console.log(`Setting ${items.length} inventory items as POS items`);
-          setMenuItems(items);
-        } else {
-          console.warn('No inventory items found or error:', itemsRes.error);
-          setCategories([]);
-          setMenuItems([]);
-        }
-      } catch (error) {
-        console.error('Error fetching inventory items for POS:', error);
+        setSelectedCategory((current) => current ?? (locs.length > 0 ? 'all' : null));
+
+        const items = sellableItems.map((item: any) => ({
+          id: normalizeDocumentId(item._id),
+          name: item.name,
+          price: item.price || 0,
+          img: item.imageUrl || "",
+          categoryId: item.location || 'No location',
+          sku: item.sku,
+          quantity: Number(item.quantity) || 0,
+        }));
+
+        setMenuItems(items);
+      } else {
         setCategories([]);
         setMenuItems([]);
-      } finally {
-        setLoading(false);
       }
-    };
-
-    fetchData();
+    } catch (error) {
+      console.error('Error fetching inventory items for POS:', error);
+      setCategories([]);
+      setMenuItems([]);
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  // Fetch inventory items from database and use them as POS items
+  useEffect(() => {
+    void loadInventoryProducts();
+  }, [loadInventoryProducts]);
 
   const addItem = (item: MenuItem) => {
     setCart((prev) => {
@@ -456,6 +444,7 @@ export default function POSPage() {
               onRemove={removeItem}
               onClear={clearCart}
               onLoadCart={loadCart}
+              onSaleComplete={loadInventoryProducts}
             />
           )}
           {sidebarMinimized && (

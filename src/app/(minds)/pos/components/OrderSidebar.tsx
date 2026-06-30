@@ -30,6 +30,7 @@ import PaymentDialog from "./PaymentDialog";
 import HeldOrdersDock from "./HeldOrdersDock";
 import { createPOSOrder, completePOSOrder } from "@/lib/desktop/pos-bridge";
 import { fiscalisePosSale } from "@/lib/desktop/fiscal-bridge";
+import { normalizeDocumentId } from "@/lib/document-id";
 import { POS_VAT_RATE, posTaxLabel } from "@/lib/pos-tax";
 
 const HELD_STORAGE_KEY = "pos_held_orders";
@@ -48,12 +49,14 @@ export default function OrderSidebar({
   onRemove,
   onClear,
   onLoadCart,
+  onSaleComplete,
 }: {
   cart: CartState;
   onAdd: (item: MenuItem) => void;
   onRemove: (id: string) => void;
   onClear: () => void;
   onLoadCart: (cart: CartState) => void;
+  onSaleComplete?: () => void | Promise<void>;
 }) {
   const entries = Object.values(cart);
   const TAX_RATE = POS_VAT_RATE;
@@ -149,7 +152,9 @@ export default function OrderSidebar({
     onProgress?.("Saving order…");
     const orderData = {
       items: entries.map((e) => ({
-        itemId: e.item.id,
+        itemId: normalizeDocumentId(e.item.id),
+        inventoryItemId: normalizeDocumentId(e.item.id),
+        sku: e.item.sku,
         name: e.item.name,
         price: e.item.price,
         quantity: e.qty,
@@ -168,7 +173,7 @@ export default function OrderSidebar({
     }
 
     onProgress?.("Recording payment…");
-    const completeResult = await completePOSOrder(String(result.data._id), {
+    const completeResult = await completePOSOrder(normalizeDocumentId(result.data._id), {
       method: paymentInfo.method,
       reference: paymentInfo.reference,
     });
@@ -209,6 +214,7 @@ export default function OrderSidebar({
   const handlePaymentSuccess = () => {
     setPaymentOpen(false);
     onClear();
+    void onSaleComplete?.();
   };
 
   const StyledPaper = styled(Paper)(({ theme }) => ({

@@ -52,7 +52,7 @@ pub fn complete_pos_order(
     method: &str,
     reference: Option<&str>,
 ) -> ActionResult<Value> {
-    let (_, org_id) = match session_org(app, session) {
+    let (user, org_id) = match session_org(app, session) {
         Ok(v) => v,
         Err(e) => return action_err(e),
     };
@@ -69,9 +69,23 @@ pub fn complete_pos_order(
         return action_err("Order not found");
     }
 
+    if orders[idx]
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s == "completed")
+        .unwrap_or(false)
+    {
+        return action_ok(orders[idx].clone());
+    }
+
     let order = orders[idx].clone();
+    let order_ref = order
+        .get("orderId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| order_id.to_string());
     if let Some(items) = order.get("items").and_then(|v| v.as_array()) {
-        if let Err(e) = decrement_inventory_for_order(app, &org_id, items) {
+        if let Err(e) = decrement_inventory_for_order(app, &org_id, &user.id, &order_ref, items) {
             return action_err(e);
         }
     }
@@ -317,44 +331,135 @@ pub fn get_inventory_items_for_pos(app: &AppState, session: &SessionState) -> Ac
 fn decrement_inventory_for_order(
     app: &AppState,
     org_id: &str,
+    created_by: &str,
+    order_ref: &str,
     items: &[Value],
 ) -> Result<(), String> {
     let mut inventory = store::read_collection(&app.db_dir(), db::DB_NAME, "inventory_items")?;
+    let mut movements = store::read_collection(&app.db_dir(), db::DB_NAME, "stock_movements")
+        .unwrap_or_default();
+    let now = iso_now();
 
     for order_item in items {
-        let item_id = order_item.get("itemId").and_then(value_as_id);
-        let name = order_item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let qty = order_item
-            .get("quantity")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as i64;
+        let item_id = order_item
+            .get("itemId")
+            .or_else(|| order_item.get("inventoryItemId"))
+            .and_then(value_as_id);
+        let sku = order_item
+            .get("sku")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let name = order_item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        let qty = quantity_from_value(order_item.get("quantity"));
+        if qty <= 0 {
+            continue;
+        }
 
         let inv_idx = inventory.iter().position(|inv| {
-            if !org_id_matches(inv, org_id) {
-                return false;
-            }
-            if let Some(ref id) = item_id {
-                if doc_id(inv).as_deref() == Some(id.as_str()) {
-                    return true;
-                }
-            }
-            inv.get("sku").and_then(|v| v.as_str()) == item_id.as_deref()
-                || inv.get("name").and_then(|v| v.as_str()) == Some(name)
+            inventory_line_matches(inv, org_id, item_id.as_deref(), sku, name)
         });
 
-        if let Some(idx) = inv_idx {
-            let current = inventory[idx]
-                .get("quantity")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as i64;
-            let new_qty = (current - qty).max(0);
-            if let Some(obj) = inventory[idx].as_object_mut() {
-                obj.insert("quantity".into(), json!(new_qty));
+        let idx = match inv_idx {
+            Some(i) => i,
+            None => {
+                let label = if !name.is_empty() {
+                    name.to_string()
+                } else if let Some(ref id) = item_id {
+                    id.clone()
+                } else {
+                    "unknown item".to_string()
+                };
+                return Err(format!("Inventory item not found for POS sale: {label}"));
             }
+        };
+
+        let previous = quantity_from_value(inventory[idx].get("quantity"));
+        let new_qty = (previous - qty).max(0);
+        if let Some(obj) = inventory[idx].as_object_mut() {
+            obj.insert("quantity".into(), json!(new_qty));
+            obj.insert("updatedAt".into(), json!(now));
         }
+
+        let inv = &inventory[idx];
+        let movement_id = make_object_id();
+        let mut movement = Map::new();
+        movement.insert("_id".into(), json!(movement_id));
+        movement.insert("orgId".into(), json!(org_id));
+        movement.insert(
+            "itemId".into(),
+            json!(doc_id(inv).unwrap_or_else(|| item_id.clone().unwrap_or_default())),
+        );
+        movement.insert(
+            "itemName".into(),
+            inv.get("name").cloned().unwrap_or(json!(name)),
+        );
+        if let Some(sku_val) = inv.get("sku") {
+            movement.insert("itemSku".into(), sku_val.clone());
+        } else if let Some(sku) = sku {
+            movement.insert("itemSku".into(), json!(sku));
+        }
+        movement.insert("type".into(), json!("OUT"));
+        movement.insert("quantity".into(), json!(qty));
+        movement.insert("previousQuantity".into(), json!(previous));
+        movement.insert("newQuantity".into(), json!(new_qty));
+        movement.insert("reason".into(), json!("POS sale"));
+        movement.insert("reference".into(), json!(order_ref));
+        movement.insert("createdBy".into(), json!(created_by));
+        movement.insert("createdAt".into(), json!(now));
+        movements.push(Value::Object(movement));
     }
 
-    store::write_collection(&app.db_dir(), db::DB_NAME, "inventory_items", &inventory)
+    store::write_collection(&app.db_dir(), db::DB_NAME, "inventory_items", &inventory)?;
+    store::write_collection(&app.db_dir(), db::DB_NAME, "stock_movements", &movements)?;
+    Ok(())
+}
+
+fn quantity_from_value(value: Option<&Value>) -> i64 {
+    match value {
+        Some(v) if v.is_i64() => v.as_i64().unwrap_or(0),
+        Some(v) if v.is_u64() => v.as_u64().unwrap_or(0) as i64,
+        Some(v) if v.is_f64() => v.as_f64().unwrap_or(0.0) as i64,
+        Some(v) if v.is_string() => v
+            .as_str()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .map(|n| n as i64)
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn inventory_line_matches(
+    inv: &Value,
+    org_id: &str,
+    item_id: Option<&str>,
+    sku: Option<&str>,
+    name: &str,
+) -> bool {
+    if !org_id_matches(inv, org_id) {
+        return false;
+    }
+    if let Some(id) = item_id.filter(|s| !s.is_empty()) {
+        if doc_id(inv).as_deref() == Some(id) {
+            return true;
+        }
+    }
+    if let Some(sku) = sku {
+        if inv.get("sku").and_then(|v| v.as_str()) == Some(sku) {
+            return true;
+        }
+    }
+    if !name.is_empty() {
+        let inv_name = inv.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if inv_name.eq_ignore_ascii_case(name) {
+            return true;
+        }
+    }
+    false
 }
 
 fn user_display_name(users: &[Value], user_ref: &str) -> Option<String> {
