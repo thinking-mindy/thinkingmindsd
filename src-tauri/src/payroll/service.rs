@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::admin::access::{doc_id, find_doc_index, org_id_matches, session_org, value_as_id};
+use crate::admin::access::{doc_id, find_doc_index, org_id_matches, require_session_user, session_org, value_as_id};
 use crate::auth::models::make_object_id;
 use crate::auth::session::SessionState;
 use crate::state::AppState;
@@ -10,6 +10,7 @@ use crate::store_util::{
     read_org_docs, update_doc_by_id,
 };
 use crate::admin::service::ActionResult;
+use crate::payroll::zw::{apply_zw_defaults, payroll_employer_cost, payroll_net_amount};
 
 const COLLECTION: &str = "payroll_records";
 
@@ -35,7 +36,7 @@ pub fn get_org_members_for_hr(app: &AppState, session: &SessionState) -> ActionR
         Err(e) => return action_err(e),
     };
 
-    let rows: Vec<HrEmployee> = users
+    let mut rows: Vec<HrEmployee> = users
         .into_iter()
         .map(|row| {
             let id = row
@@ -90,6 +91,40 @@ pub fn get_org_members_for_hr(app: &AppState, session: &SessionState) -> ActionR
         })
         .collect();
 
+    if rows.is_empty() {
+        if let Ok(user) = require_session_user(app, session) {
+            let name = format!(
+                "{} {}",
+                user.first_name.clone().unwrap_or_default(),
+                user.last_name.clone().unwrap_or_default()
+            )
+            .trim()
+            .to_string();
+            let role = user
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("role"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            rows.push(HrEmployee {
+                id: user.id.clone(),
+                email: user.email.clone(),
+                name: if name.is_empty() {
+                    user.email.clone()
+                } else {
+                    name
+                },
+                role,
+                department: user
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("dep").or_else(|| m.get("department")))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            });
+        }
+    }
+
     action_ok(rows)
 }
 
@@ -106,6 +141,7 @@ pub fn create_payroll_record(
         Some(v) => v.clone(),
         None => return action_err("Invalid payroll payload"),
     };
+    payload = apply_zw_defaults(payload);
     payload.insert("createdAt".into(), json!(iso_now()));
     payload.insert("updatedAt".into(), json!(iso_now()));
     if !payload.contains_key("recordId") {
@@ -119,13 +155,16 @@ pub fn create_payroll_record(
     match insert_org_doc(app, COLLECTION, &org_id, payload) {
         Ok(v) => {
             let rec_id = doc_id(&v).unwrap_or_default();
-            let net = v
-                .get("netPay")
-                .or_else(|| v.get("amount"))
-                .and_then(|x| x.as_f64())
-                .unwrap_or(0.0);
-            let employee = v.get("employeeName").and_then(|x| x.as_str());
-            crate::accounting::service::try_post_payroll(app, &org_id, &rec_id, net, employee);
+            let employer_cost = payroll_employer_cost(&v);
+            let net = payroll_net_amount(&v);
+            let employee = v
+                .get("employeeName")
+                .and_then(|x| x.as_str())
+                .or_else(|| v.get("employeeId").and_then(|x| x.as_str()));
+            if let Err(e) = crate::finance::service::record_payroll_expense(app, &org_id, &v) {
+                eprintln!("[payroll] expense sync failed: {e}");
+            }
+            crate::accounting::service::try_post_payroll(app, &org_id, &rec_id, employer_cost.max(net), employee);
             action_ok(v)
         }
         Err(e) => action_err(e),

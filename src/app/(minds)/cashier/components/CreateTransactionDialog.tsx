@@ -40,7 +40,7 @@ import { getStudentTermFeeBalance } from "@/lib/desktop/school-bridge";
 import { EDUCATION_LEVEL_META } from "@/lib/school-levels";
 import type { SchoolStudent } from "@/types/school";
 import { formatSchoolCurrency, type StudentTermFeeBalance } from "@/lib/school-fees";
-import { partitionPaymentTypes } from "@/lib/finance-shared";
+import { partitionPaymentTypes, isSchoolPaymentType, isTuitionPaymentType } from "@/lib/finance-shared";
 import PaymentTypeCard from "./PaymentTypeCard";
 import type { CashierDraft } from "./CashierSidebar";
 import { TX_TYPES } from "./CashierSidebar";
@@ -119,7 +119,8 @@ export default function CreateTransactionDialog({
       setFeeBalance(null);
       return;
     }
-    const pending = parseFloat(draft.amount) || 0;
+    const pending =
+      paymentType && isTuitionPaymentType(paymentType) ? parseFloat(draft.amount) || 0 : 0;
     let cancelled = false;
     getStudentTermFeeBalance(draft.studentId, pending).then((res) => {
       if (!cancelled && res.success && res.data) setFeeBalance(res.data);
@@ -127,7 +128,7 @@ export default function CreateTransactionDialog({
     return () => {
       cancelled = true;
     };
-  }, [isSchool, draft.studentId, draft.amount]);
+  }, [isSchool, draft.studentId, draft.amount, paymentType]);
 
   const setPaymentMode = (school: boolean) => {
     const types = school ? schoolTypes : generalTypes;

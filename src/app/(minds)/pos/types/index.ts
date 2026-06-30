@@ -61,6 +61,7 @@ export type Receipt = {
   id: string;
   date: string; // ISO or readable
   table?: string;
+  cashierName?: string;
   entries: { item: MenuItem; qty: number }[];
   subtotal: number;
   tax: number;

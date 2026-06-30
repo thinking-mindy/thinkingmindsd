@@ -1,9 +1,10 @@
 use serde_json::{json, Map, Value};
 
-use crate::admin::access::{doc_id, session_org};
+use crate::admin::access::{doc_id, org_id_matches, session_org, value_as_id};
 use crate::admin::service::ActionResult;
-use crate::auth::models::make_object_id;
+use crate::auth::models::{make_object_id, PublicProfile};
 use crate::auth::session::SessionState;
+use crate::db::{self, store};
 use crate::state::AppState;
 use crate::store_util::{
     action_err, action_ok, delete_doc_by_id, in_date_range, insert_org_doc, iso_now, now_ms,
@@ -17,6 +18,7 @@ const FINANCE_SETTINGS: &str = "finance_settings";
 const CASHIER_TRANSACTIONS: &str = "cashier_transactions";
 const BUDGETS: &str = "budgets";
 const POS_ORDERS: &str = "pos_orders";
+const PAYROLL_RECORDS: &str = "payroll_records";
 
 const DEFAULT_FINANCE_SETTINGS_JSON: &str = r#"{
   "defaultCurrency": "USD",
@@ -226,6 +228,9 @@ pub fn get_payments_by_org(
         Ok(v) => v,
         Err(e) => return action_err(e),
     };
+    if let Err(e) = sync_ops_payments_for_org(app, &target_org) {
+        return action_err(e);
+    }
     let mut rows = match read_org_docs(app, PAYMENTS, &target_org) {
         Ok(v) => v,
         Err(e) => return action_err(e),
@@ -308,6 +313,9 @@ pub fn get_expenses_by_org(
         Ok(v) => v,
         Err(e) => return action_err(e),
     };
+    if let Err(e) = sync_payroll_expenses_for_org(app, &target_org) {
+        eprintln!("[finance] payroll expense sync failed: {e}");
+    }
     let start_ms = start_date.and_then(parse_iso_ms);
     let end_ms = end_date.and_then(parse_iso_ms).map(end_of_day_ms);
     let mut rows = match read_org_docs(app, EXPENSES, &target_org) {
@@ -495,12 +503,20 @@ pub fn create_cashier_transaction(
     doc.remove("_id");
     doc.insert("orgId".into(), json!(org_id.clone()));
     doc.insert("cashierId".into(), json!(user.id));
+    doc.insert("cashierName".into(), json!(PublicProfile::from_user(&user).display_name));
     doc.insert("createdAt".into(), json!(iso_now()));
 
     let is_school_payment = doc
         .get("isSchoolPayment")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || crate::school::school_term::is_school_payment_type(
+            doc.get("paymentTypeId").and_then(|v| v.as_str()),
+            doc.get("paymentType").and_then(|v| v.as_str()),
+        );
+    if is_school_payment {
+        doc.insert("isSchoolPayment".into(), json!(true));
+    }
     let student_id = doc
         .get("studentId")
         .and_then(|v| v.as_str())
@@ -508,8 +524,23 @@ pub fn create_cashier_transaction(
 
     if is_school_payment {
         if let Some(student_id) = student_id {
+            let payment_amount = doc
+                .get("amount")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                .abs();
+            let additional = if crate::school::school_term::school_payment_counts_for_term_balance(&Value::Object(doc.clone()))
+            {
+                crate::school::school_term::school_payment_delta(
+                    doc.get("type").and_then(|v| v.as_str()),
+                    Some(payment_amount),
+                )
+                .max(0.0)
+            } else {
+                0.0
+            };
             if let Ok(Some(snapshot)) =
-                crate::school::service::build_school_fee_snapshot(app, &org_id, &student_id, 0.0, None)
+                crate::school::service::build_school_fee_snapshot(app, &org_id, &student_id, additional, None)
             {
                 if let Some(term_id) = snapshot.get("schoolTermId") {
                     doc.insert("schoolTermId".into(), term_id.clone());
@@ -533,6 +564,9 @@ pub fn create_cashier_transaction(
     match insert_org_doc(app, CASHIER_TRANSACTIONS, &org_id, doc) {
         Ok(v) => {
             maybe_post_cashier_gl(app, &org_id, &v);
+            if let Err(e) = record_cashier_payment(app, &org_id, &v) {
+                eprintln!("[finance] cashier payment sync failed: {e}");
+            }
             action_ok(v)
         }
         Err(e) => action_err(e),
@@ -564,22 +598,47 @@ pub fn get_cashier_transactions_filtered(
         Ok(v) => v,
         Err(e) => return action_err(e),
     };
-    let start_ms = start_date.and_then(parse_iso_ms);
-    let end_ms = end_date.and_then(parse_iso_ms);
-    let mut rows = match read_org_docs(app, CASHIER_TRANSACTIONS, &target_org) {
-        Ok(v) => v
-            .into_iter()
-            .filter(|d| {
-                if let Some(cid) = cashier_id {
-                    if d.get("cashierId").and_then(|v| v.as_str()) != Some(cid) {
-                        return false;
-                    }
-                }
-                in_date_range(d, "createdAt", start_ms, end_ms)
-            })
-            .collect::<Vec<_>>(),
+    let start_ms = start_date.and_then(parse_filter_start_ms);
+    let end_ms = end_date.and_then(parse_filter_end_ms);
+    let all_rows = match store::read_collection(&app.db_dir(), db::DB_NAME, CASHIER_TRANSACTIONS) {
+        Ok(v) => v,
         Err(e) => return action_err(e),
     };
+    let mut rows: Vec<Value> = all_rows
+        .iter()
+        .filter(|d| org_id_matches(d, &target_org))
+        .cloned()
+        .collect();
+    if rows.is_empty() && !all_rows.is_empty() {
+        // Legacy rows may lack orgId — desktop register still needs to show them
+        rows = all_rows
+            .iter()
+            .filter(|d| {
+                d.get("orgId").is_none()
+                    || d.get("orgId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.is_empty())
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            rows = all_rows;
+        }
+    }
+    let mut rows = rows
+        .into_iter()
+        .filter(|d| {
+            if let Some(cid) = cashier_id {
+                match d.get("cashierId").and_then(value_as_id) {
+                    Some(stored) if stored == cid => {}
+                    None => {}
+                    Some(_) => return false,
+                }
+            }
+            in_date_range(d, "createdAt", start_ms, end_ms)
+        })
+        .collect::<Vec<_>>();
     rows.sort_by(sort_created_desc);
     if let Some(v) = limit {
         rows.truncate(v);
@@ -904,6 +963,7 @@ pub fn get_financial_summary(
     let expenses = read_org_docs(app, EXPENSES, &target_org).unwrap_or_default();
     let payments = read_org_docs(app, PAYMENTS, &target_org).unwrap_or_default();
     let pos_orders = read_org_docs(app, POS_ORDERS, &target_org).unwrap_or_default();
+    let cashier_txs = read_org_docs(app, CASHIER_TRANSACTIONS, &target_org).unwrap_or_default();
 
     let invoice_revenue = invoices
         .iter()
@@ -920,7 +980,8 @@ pub fn get_financial_summary(
         .iter()
         .map(|o| as_num(o.get("total")))
         .sum::<f64>();
-    let total_revenue = invoice_revenue + pos_revenue;
+    let cashier_revenue = cashier_revenue_in_range(&cashier_txs, range_start, range_end);
+    let total_revenue = invoice_revenue + pos_revenue + cashier_revenue;
 
     let total_expenses = expenses
         .iter()
@@ -963,6 +1024,7 @@ pub fn get_financial_summary(
     action_ok(json!({
         "invoiceRevenue": invoice_revenue,
         "posRevenue": pos_revenue,
+        "cashierRevenue": cashier_revenue,
         "posOrders": pos_in_range.len(),
         "totalRevenue": total_revenue,
         "totalExpenses": total_expenses,
@@ -997,6 +1059,7 @@ pub fn get_finance_monthly_trends(
     let invoices = read_org_docs(app, INVOICES, &target_org).unwrap_or_default();
     let expenses = read_org_docs(app, EXPENSES, &target_org).unwrap_or_default();
     let pos_orders = read_org_docs(app, POS_ORDERS, &target_org).unwrap_or_default();
+    let cashier_txs = read_org_docs(app, CASHIER_TRANSACTIONS, &target_org).unwrap_or_default();
 
     let mut rows = Vec::with_capacity(count);
     let (current_year, current_month) = ms_to_ym(now_ms());
@@ -1014,7 +1077,8 @@ pub fn get_finance_monthly_trends(
             .filter(|o| pos_completed_in_range(o, start_ms, end_ms))
             .map(|o| as_num(o.get("total")))
             .sum::<f64>();
-        let revenue = invoice_revenue + pos_revenue;
+        let cashier_revenue = cashier_revenue_in_range(&cashier_txs, start_ms, end_ms);
+        let revenue = invoice_revenue + pos_revenue + cashier_revenue;
         let expense = expenses
             .iter()
             .filter(|e| {
@@ -1205,6 +1269,28 @@ fn day_range_from_input(input: Option<&str>) -> (i64, i64, String) {
     (start, end, ms_to_iso_safe(start))
 }
 
+fn parse_filter_start_ms(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.len() == 10 {
+        return parse_iso_ms(&format!("{value}T00:00:00"));
+    }
+    parse_iso_ms(value)
+}
+
+fn parse_filter_end_ms(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.len() == 10 {
+        return parse_iso_ms(&format!("{value}T23:59:59"));
+    }
+    parse_iso_ms(value)
+}
+
 fn end_of_day_ms(ms: i64) -> i64 {
     let days = ms.div_euclid(86_400_000);
     days * 86_400_000 + 86_399_999
@@ -1287,6 +1373,12 @@ fn maybe_post_payment_gl(app: &AppState, org_id: &str, row: &Value) {
     if row.get("status").and_then(|v| v.as_str()) != Some("completed") {
         return;
     }
+    if matches!(
+        row.get("sourceType").and_then(|v| v.as_str()),
+        Some("pos") | Some("cashier")
+    ) {
+        return;
+    }
     let pay_id = gl_doc_id(row);
     let amount = row.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let method = row.get("method").and_then(|v| v.as_str());
@@ -1295,6 +1387,9 @@ fn maybe_post_payment_gl(app: &AppState, org_id: &str, row: &Value) {
 
 fn maybe_post_expense_gl(app: &AppState, org_id: &str, row: &Value) {
     if row.get("status").and_then(|v| v.as_str()) != Some("approved") {
+        return;
+    }
+    if matches!(row.get("sourceType").and_then(|v| v.as_str()), Some("payroll")) {
         return;
     }
     let exp_id = gl_doc_id(row);
@@ -1309,5 +1404,260 @@ fn maybe_post_cashier_gl(app: &AppState, org_id: &str, row: &Value) {
     let amount = row.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let desc = row.get("description").and_then(|v| v.as_str());
     crate::accounting::service::try_post_cashier(app, org_id, &tx_id, tx_type, amount, desc);
+}
+
+pub fn record_pos_payment(app: &AppState, org_id: &str, order: &Value) -> Result<(), String> {
+    if order.get("status").and_then(|v| v.as_str()) != Some("completed") {
+        return Ok(());
+    }
+    let id = doc_id(order).ok_or_else(|| "POS order id missing".to_string())?;
+    let source_ref = format!("pos:{id}");
+    if payment_source_exists(app, org_id, &source_ref)? {
+        return Ok(());
+    }
+    let amount = as_num(order.get("total"));
+    if amount <= 0.0 {
+        return Ok(());
+    }
+    let mut doc = Map::new();
+    doc.insert("amount".into(), json!(amount));
+    doc.insert(
+        "method".into(),
+        json!(map_pos_payment_method(
+            order.get("paymentMethod").and_then(|v| v.as_str())
+        )),
+    );
+    doc.insert("status".into(), json!("completed"));
+    doc.insert("sourceType".into(), json!("pos"));
+    doc.insert("sourceRef".into(), json!(source_ref));
+    doc.insert("sourceId".into(), json!(id));
+    if let Some(order_no) = order.get("orderId").and_then(|v| v.as_str()) {
+        doc.insert("transactionId".into(), json!(order_no));
+    }
+    if let Some(reference) = order.get("paymentReference").and_then(|v| v.as_str()) {
+        doc.insert("reference".into(), json!(reference));
+    }
+    doc.insert("notes".into(), json!("POS sale"));
+    if let Some(name) = order
+        .get("completedByName")
+        .or_else(|| order.get("createdByName"))
+        .and_then(|v| v.as_str())
+    {
+        doc.insert("receivedBy".into(), json!(name));
+    }
+    if let Some(at) = order.get("completedAt").or_else(|| order.get("createdAt")) {
+        doc.insert("createdAt".into(), at.clone());
+    }
+    insert_org_doc(app, PAYMENTS, org_id, doc)?;
+    Ok(())
+}
+
+pub fn record_cashier_payment(app: &AppState, org_id: &str, tx: &Value) -> Result<(), String> {
+    let tx_type = tx.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if !matches!(tx_type, "sale" | "deposit" | "refund" | "withdrawal") {
+        return Ok(());
+    }
+    let id = doc_id(tx).ok_or_else(|| "Cashier transaction id missing".to_string())?;
+    let source_ref = format!("cashier:{id}");
+    if payment_source_exists(app, org_id, &source_ref)? {
+        return Ok(());
+    }
+    let amount = as_num(tx.get("amount")).abs();
+    if amount <= 0.0 {
+        return Ok(());
+    }
+    let mut doc = Map::new();
+    doc.insert("amount".into(), json!(amount));
+    doc.insert(
+        "method".into(),
+        json!(map_cashier_payment_method(
+            tx.get("paymentMethod").and_then(|v| v.as_str())
+        )),
+    );
+    doc.insert(
+        "status".into(),
+        json!(if matches!(tx_type, "refund" | "withdrawal") {
+            "completed"
+        } else {
+            "completed"
+        }),
+    );
+    doc.insert("sourceType".into(), json!("cashier"));
+    doc.insert("sourceRef".into(), json!(source_ref));
+    doc.insert("sourceId".into(), json!(id));
+    if let Some(reference) = tx.get("reference").and_then(|v| v.as_str()) {
+        doc.insert("transactionId".into(), json!(reference));
+        doc.insert("reference".into(), json!(reference));
+    }
+    let notes = tx
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or(match tx_type {
+            "sale" => "Cashier sale",
+            "deposit" => "Cashier deposit",
+            "refund" => "Cashier refund",
+            _ => "Cashier withdrawal",
+        });
+    doc.insert("notes".into(), json!(notes));
+    if tx.get("isSchoolPayment").and_then(|v| v.as_bool()) == Some(true) {
+        doc.insert("isSchoolPayment".into(), json!(true));
+        if let Some(student) = tx.get("studentName").and_then(|v| v.as_str()) {
+            doc.insert("studentName".into(), json!(student));
+        }
+        if let Some(pt) = tx.get("paymentType").and_then(|v| v.as_str()) {
+            doc.insert("paymentType".into(), json!(pt));
+        }
+    }
+    if let Some(name) = tx.get("cashierName").and_then(|v| v.as_str()) {
+        doc.insert("receivedBy".into(), json!(name));
+    }
+    if let Some(at) = tx.get("createdAt") {
+        doc.insert("createdAt".into(), at.clone());
+    }
+    insert_org_doc(app, PAYMENTS, org_id, doc)?;
+    Ok(())
+}
+
+pub fn record_payroll_expense(app: &AppState, org_id: &str, record: &Value) -> Result<(), String> {
+    let id = doc_id(record).ok_or_else(|| "Payroll record id missing".to_string())?;
+    let source_ref = format!("payroll:{id}");
+    if expense_source_exists(app, org_id, &source_ref)? {
+        return Ok(());
+    }
+    let gross = as_num(record.get("gross"));
+    if gross <= 0.0 {
+        return Ok(());
+    }
+    let employee = record
+        .get("employeeName")
+        .and_then(|v| v.as_str())
+        .or_else(|| record.get("employeeId").and_then(|v| v.as_str()))
+        .unwrap_or("Employee");
+    let period = record
+        .get("payPeriod")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Pay period");
+    let net = record
+        .get("net")
+        .or_else(|| record.get("netPay"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let paye = record
+        .get("zwPaye")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let nssa = record
+        .get("zwNssaEmployee")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+
+    let mut doc = Map::new();
+    doc.insert("amount".into(), json!(gross));
+    doc.insert("category".into(), json!("Payroll"));
+    doc.insert("status".into(), json!("approved"));
+    doc.insert("sourceType".into(), json!("payroll"));
+    doc.insert("sourceRef".into(), json!(source_ref));
+    doc.insert("sourceId".into(), json!(id));
+    doc.insert(
+        "description".into(),
+        json!(format!("Salary — {employee} — {period}")),
+    );
+    doc.insert(
+        "notes".into(),
+        json!(format!(
+            "Zimbabwe payroll · Gross {gross:.2} · Net {net:.2} · PAYE {paye:.2} · NSSA {nssa:.2}"
+        )),
+    );
+    doc.insert("currency".into(), json!("USD"));
+    if let Some(at) = record.get("createdAt") {
+        doc.insert("date".into(), at.clone());
+        doc.insert("createdAt".into(), at.clone());
+    } else {
+        let now = iso_now();
+        doc.insert("date".into(), json!(now));
+        doc.insert("createdAt".into(), json!(now));
+    }
+    insert_org_doc(app, EXPENSES, org_id, doc)?;
+    Ok(())
+}
+
+pub fn sync_payroll_expenses_for_org(app: &AppState, org_id: &str) -> Result<(), String> {
+    let records = read_org_docs(app, PAYROLL_RECORDS, org_id)?;
+    for record in records {
+        if let Err(e) = record_payroll_expense(app, org_id, &record) {
+            eprintln!("[finance] payroll expense sync failed: {e}");
+        }
+    }
+    Ok(())
+}
+
+fn expense_source_exists(app: &AppState, org_id: &str, source_ref: &str) -> Result<bool, String> {
+    let expenses = read_org_docs(app, EXPENSES, org_id)?;
+    Ok(expenses
+        .iter()
+        .any(|e| e.get("sourceRef").and_then(|v| v.as_str()) == Some(source_ref)))
+}
+
+pub fn sync_ops_payments_for_org(app: &AppState, org_id: &str) -> Result<(), String> {
+    let pos_orders = read_org_docs(app, POS_ORDERS, org_id)?;
+    for order in pos_orders {
+        if let Err(e) = record_pos_payment(app, org_id, &order) {
+            eprintln!("[finance] POS payment sync failed: {e}");
+        }
+    }
+    let cashier_txs = read_org_docs(app, CASHIER_TRANSACTIONS, org_id)?;
+    for tx in cashier_txs {
+        if let Err(e) = record_cashier_payment(app, org_id, &tx) {
+            eprintln!("[finance] cashier payment sync failed: {e}");
+        }
+    }
+    Ok(())
+}
+
+fn payment_source_exists(app: &AppState, org_id: &str, source_ref: &str) -> Result<bool, String> {
+    let payments = read_org_docs(app, PAYMENTS, org_id)?;
+    Ok(payments
+        .iter()
+        .any(|p| p.get("sourceRef").and_then(|v| v.as_str()) == Some(source_ref)))
+}
+
+fn map_pos_payment_method(method: Option<&str>) -> &'static str {
+    match method {
+        Some("card") => "credit_card",
+        Some("bank_transfer") | Some("check") => "bank_transfer",
+        _ => "cash",
+    }
+}
+
+fn map_cashier_payment_method(method: Option<&str>) -> &'static str {
+    match method {
+        Some("card") | Some("credit_card") => "credit_card",
+        Some("bank_transfer") | Some("check") => "bank_transfer",
+        _ => "cash",
+    }
+}
+
+fn cashier_revenue_in_range(rows: &[Value], start_ms: i64, end_ms: i64) -> f64 {
+    rows.iter()
+        .filter(|tx| {
+            matches!(
+                tx.get("type").and_then(|v| v.as_str()),
+                Some("sale") | Some("deposit")
+            )
+        })
+        .filter(|tx| in_date_range(tx, "createdAt", Some(start_ms), Some(end_ms)))
+        .map(|tx| as_num(tx.get("amount")).abs())
+        .sum::<f64>()
+        - rows
+            .iter()
+            .filter(|tx| {
+                matches!(
+                    tx.get("type").and_then(|v| v.as_str()),
+                    Some("refund") | Some("withdrawal")
+                )
+            })
+            .filter(|tx| in_date_range(tx, "createdAt", Some(start_ms), Some(end_ms)))
+            .map(|tx| as_num(tx.get("amount")).abs())
+            .sum::<f64>()
 }
 

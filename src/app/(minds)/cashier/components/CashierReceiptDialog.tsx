@@ -14,10 +14,27 @@ import {
 import Close from "@mui/icons-material/Close";
 import ReceiptPreview from "@/app/(minds)/pos/components/ReceiptPreview";
 import { getSchoolReceiptFeeInfo } from "@/lib/desktop/school-bridge";
-import { cashierTransactionToReceipt, type CashierReceiptSource } from "@/lib/cashier-receipt";
+import { isTuitionPaymentType } from "@/lib/finance-shared";
+import { cashierTransactionToReceipt, enrichSchoolFeeSnapshot, type CashierReceiptSource } from "@/lib/cashier-receipt";
 
 function needsFeeLookup(tx: CashierReceiptSource): boolean {
-  return Boolean(tx.isSchoolPayment && tx.studentId && Number(tx.termFeesTotal ?? 0) <= 0);
+  if (!tx.isSchoolPayment || !tx.studentId) return false;
+  const paymentType = {
+    id: String(tx.paymentTypeId ?? ""),
+    name: String(tx.paymentType ?? ""),
+  };
+  if (!isTuitionPaymentType(paymentType)) return false;
+  if (Number(tx.termFeesTotal ?? 0) <= 0) return true;
+  const enriched = enrichSchoolFeeSnapshot(tx);
+  const paymentAmount = Math.abs(Number(tx.amount ?? 0));
+  const total = Number(tx.termFeesTotal ?? 0);
+  const paid = Number(tx.termFeesPaid ?? 0);
+  const remaining = Number(tx.termFeesRemaining ?? 0);
+  return (
+    paymentAmount > 0 &&
+    Math.abs(paid + remaining - total) < 0.02 &&
+    Math.abs(Number(enriched.termFeesPaid ?? 0) - paid) < 0.02
+  );
 }
 
 export default function CashierReceiptDialog({
@@ -40,7 +57,7 @@ export default function CashierReceiptDialog({
     }
 
     if (!needsFeeLookup(tx)) {
-      setResolvedTx(tx);
+      setResolvedTx(enrichSchoolFeeSnapshot(tx));
       setLoadingFees(false);
       return;
     }

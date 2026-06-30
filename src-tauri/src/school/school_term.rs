@@ -82,6 +82,38 @@ pub fn school_payment_delta(tx_type: Option<&str>, amount: Option<f64>) -> f64 {
     }
 }
 
+pub fn school_payment_counts_for_term_balance(tx: &Value) -> bool {
+    let id = tx
+        .get("paymentTypeId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let name = tx
+        .get("paymentType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if id == "transport" || name.contains("transport") {
+        return false;
+    }
+    if id == "uniform-fee" || name.contains("uniform") {
+        return false;
+    }
+    true
+}
+
+pub fn is_school_payment_type(payment_type_id: Option<&str>, payment_type: Option<&str>) -> bool {
+    let id = payment_type_id.unwrap_or("").to_lowercase();
+    let name = payment_type.unwrap_or("").to_lowercase();
+    if matches!(id.as_str(), "tuition-fees" | "transport" | "uniform-fee") {
+        return true;
+    }
+    name.contains("tuition")
+        || name.contains("transport")
+        || name.contains("uniform")
+        || name.contains("school fee")
+}
+
 pub fn compute_term_fee_balance(
     fees_per_term: f64,
     transactions: &[Value],
@@ -122,6 +154,9 @@ pub fn compute_term_fee_balance(
                 continue;
             }
         }
+        if !school_payment_counts_for_term_balance(tx) {
+            continue;
+        }
         if !transaction_in_term(tx, &resolved_term) {
             continue;
         }
@@ -133,7 +168,12 @@ pub fn compute_term_fee_balance(
 
     let paid = paid.max(0.0);
     let fees_per_term = fees_per_term.max(0.0);
-    let with_additional = paid + additional_payment.max(0.0);
+    let tuition_additional = if additional_payment > 0.0 {
+        additional_payment.max(0.0)
+    } else {
+        0.0
+    };
+    let with_additional = paid + tuition_additional;
     let remaining = (fees_per_term - with_additional).max(0.0);
     let percent_paid = if fees_per_term > 0.0 {
         ((with_additional / fees_per_term) * 100.0).round().clamp(0.0, 100.0) as i64

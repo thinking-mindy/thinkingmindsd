@@ -193,7 +193,7 @@ pub fn doc_date_ms(doc: &Value, field: &str) -> i64 {
 pub fn in_date_range(doc: &Value, field: &str, start_ms: Option<i64>, end_ms: Option<i64>) -> bool {
     let ms = doc_date_ms(doc, field);
     if ms == 0 {
-        return start_ms.is_none() && end_ms.is_none();
+        return true;
     }
     if let Some(s) = start_ms {
         if ms < s {

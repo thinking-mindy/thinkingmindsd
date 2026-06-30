@@ -20,6 +20,7 @@ import SmartphoneIcon from "@mui/icons-material/Smartphone";
 import CreditCardIcon from "@mui/icons-material/CreditCard";
 import AttachMoneyIcon from "@mui/icons-material/AttachMoney";
 import { useUser } from "@/lib/auth/client";
+import { getCashierDisplayName } from "@/lib/cashier-display-name";
 import { FiscalReceiptInfo, MenuItem, Receipt } from "../types";
 import ReceiptPreview from "./ReceiptPreview";
 import { initiatePOSPayNowPayment, checkPlanPaymentStatus } from "@/lib/desktop/payments-bridge";
@@ -97,6 +98,7 @@ export default function PaymentDialog({
   const paynowPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { user } = useUser();
   const orgId = (user?.publicMetadata?.companyId as string) || "";
+  const cashierName = getCashierDisplayName(user);
 
   useEffect(() => {
     if (open) {
@@ -168,6 +170,7 @@ export default function PaymentDialog({
       id: fiscal?.invoiceNo ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       date: new Date().toISOString(),
       table,
+      cashierName,
       entries: entries.map((e) => ({ item: e.item, qty: e.qty })),
       subtotal,
       tax,

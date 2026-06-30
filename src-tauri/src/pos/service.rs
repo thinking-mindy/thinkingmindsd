@@ -4,7 +4,7 @@ use crate::admin::access::{
     doc_id, find_doc_by_id, find_doc_index, org_id_matches, session_org, value_as_id,
 };
 use crate::admin::service::ActionResult;
-use crate::auth::models::make_object_id;
+use crate::auth::models::{make_object_id, PublicProfile};
 use crate::auth::session::SessionState;
 use crate::db::{self, store};
 use crate::state::AppState;
@@ -34,6 +34,7 @@ pub fn create_pos_order(
     {
         order.insert("createdBy".into(), json!(user.id));
     }
+    order.insert("createdByName".into(), json!(PublicProfile::from_user(&user).display_name));
 
     let mut docs = store::read_collection(&app.db_dir(), db::DB_NAME, "pos_orders")
         .map_err(|e| e.to_string())
@@ -98,6 +99,11 @@ pub fn complete_pos_order(
             obj.insert("paymentReference".into(), json!(r));
         }
         obj.insert("completedAt".into(), json!(iso_now()));
+        obj.insert("completedBy".into(), json!(user.id));
+        obj.insert(
+            "completedByName".into(),
+            json!(PublicProfile::from_user(&user).display_name),
+        );
     }
 
     let updated = orders[idx].clone();
@@ -107,6 +113,9 @@ pub fn complete_pos_order(
     let order_id_str = crate::admin::access::doc_id(&updated).unwrap_or_else(|| order_id.to_string());
     let total = updated.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
     crate::accounting::service::try_post_pos(app, &org_id, &order_id_str, total);
+    if let Err(e) = crate::finance::service::record_pos_payment(app, &org_id, &updated) {
+        eprintln!("[pos] finance payment sync failed: {e}");
+    }
     action_ok(updated)
 }
 

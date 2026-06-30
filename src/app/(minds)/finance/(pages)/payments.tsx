@@ -182,6 +182,21 @@ export default function PaymentsTab() {
     }
   };
 
+  const getSourceLabel = (payment: any) => {
+    const source = payment.sourceType;
+    if (source === 'pos') return 'POS';
+    if (source === 'cashier') return 'Cashier';
+    return payment.invoiceId ? 'Invoice' : 'Manual';
+  };
+
+  const getSourceColor = (payment: any): 'primary' | 'secondary' | 'success' | 'default' => {
+    const source = payment.sourceType;
+    if (source === 'pos') return 'primary';
+    if (source === 'cashier') return 'secondary';
+    if (payment.invoiceId) return 'success';
+    return 'default';
+  };
+
   const getMethodIcon = (method: string) => {
     switch (method) {
       case 'bank_transfer':
@@ -281,7 +296,10 @@ export default function PaymentsTab() {
       const query = searchQuery.toLowerCase();
       filtered = filtered.filter((p: any) =>
         p.reference?.toLowerCase().includes(query) ||
+        p.transactionId?.toLowerCase().includes(query) ||
         p.notes?.toLowerCase().includes(query) ||
+        p.receivedBy?.toLowerCase().includes(query) ||
+        p.sourceType?.toLowerCase().includes(query) ||
         p.amount?.toString().includes(query) ||
         p.invoiceId?.toString().toLowerCase().includes(query)
       );
@@ -311,10 +329,10 @@ export default function PaymentsTab() {
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
         <Box>
           <Typography variant="h5" fontWeight={800}>
-            Accounts Payable Management
+            Payment Collections
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Track, manage, and process all outgoing payments
+            Invoice payments, POS sales, and cashier receipts
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
@@ -647,7 +665,7 @@ export default function PaymentsTab() {
                   }}
                 >
                   <TableCell>Date</TableCell>
-                  <TableCell>Invoice</TableCell>
+                  <TableCell>Source</TableCell>
                   <TableCell>Payment Method</TableCell>
                   <TableCell>Reference</TableCell>
                   <TableCell>Status</TableCell>
@@ -680,18 +698,24 @@ export default function PaymentsTab() {
                         </Box>
                       </TableCell>
                       <TableCell>
-                        {payment.invoiceId ? (
+                        <Stack spacing={0.5}>
                           <Chip
-                            label={`#${payment.invoiceId.toString().slice(-8)}`}
+                            label={getSourceLabel(payment)}
                             size="small"
-                            variant="outlined"
-                            sx={{ fontWeight: 600, fontSize: '0.7rem', height: 24 }}
+                            color={getSourceColor(payment)}
+                            sx={{ fontWeight: 700, fontSize: '0.7rem', height: 24 }}
                           />
-                        ) : (
-                          <Typography variant="body2" color="text.secondary">
-                            N/A
-                          </Typography>
-                        )}
+                          {payment.invoiceId && (
+                            <Typography variant="caption" color="text.secondary">
+                              #{payment.invoiceId.toString().slice(-8)}
+                            </Typography>
+                          )}
+                          {payment.receivedBy && (
+                            <Typography variant="caption" color="text.secondary">
+                              {payment.receivedBy}
+                            </Typography>
+                          )}
+                        </Stack>
                       </TableCell>
                       <TableCell>
                         <Stack direction="row" alignItems="center" spacing={1}>
@@ -712,7 +736,7 @@ export default function PaymentsTab() {
                       </TableCell>
                       <TableCell>
                         <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                          {payment.reference || '-'}
+                          {payment.reference || payment.transactionId || payment.notes || '-'}
                         </Typography>
                       </TableCell>
                       <TableCell>

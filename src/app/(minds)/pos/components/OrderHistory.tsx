@@ -170,6 +170,7 @@ export default function OrderHistory({
           method: (order.paymentMethod || "cash") as "cash" | "paynow" | "card",
           reference: order.paymentReference,
         },
+        cashierName: order.completedByName || order.createdByName,
         fiscal: order.fiscal,
       };
       await generateAndDownloadPdf(receipt, receiptDesign);

@@ -33,6 +33,14 @@ export function isSchoolPaymentType(pt: { id: string; name: string }): boolean {
   return SCHOOL_NAME_PATTERN.test(pt.name);
 }
 
+export function isTuitionPaymentType(pt: { id: string; name: string }): boolean {
+  const id = pt.id.toLowerCase();
+  const name = pt.name.toLowerCase();
+  if (id === 'transport' || name.includes('transport')) return false;
+  if (id === 'uniform-fee' || name.includes('uniform')) return false;
+  return id === 'tuition-fees' || name.includes('tuition') || isSchoolPaymentType(pt);
+}
+
 export function partitionPaymentTypes(types: FinancePaymentType[]) {
   const school = types.filter((pt) => pt.enabled && isSchoolPaymentType(pt));
   const general = types.filter((pt) => pt.enabled && !isSchoolPaymentType(pt));

@@ -27,6 +27,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
+      "@/lib/auth/server": ["./src/lib/auth/server-shim.ts"],
       "@/lib/auth/server": ["./src/lib/auth/server-shim.ts"]
     }
   },

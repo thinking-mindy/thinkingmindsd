@@ -139,6 +139,10 @@ export const buildReceiptHtml = async (
 
   const dateRow = settings.showDate ? `<div class="muted">Date: ${date}</div>` : "";
 
+  const cashierRow = receipt.cashierName
+    ? `<div class="muted">Cashier: ${escapeHtml(receipt.cashierName)}</div>`
+    : "";
+
   const subtotalRow = settings.showSubtotal
     ? `<tr class="totals"><td>Subtotal</td><td style="text-align:right">$${receipt.subtotal.toFixed(2)}</td></tr>`
     : "";
@@ -202,6 +206,7 @@ export const buildReceiptHtml = async (
               ${tableRow}
               ${receiptIdRow}
               ${dateRow}
+              ${cashierRow}
             </div>
           </div>
         </div>

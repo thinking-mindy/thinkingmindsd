@@ -218,6 +218,11 @@ export default function ReceiptPreview({ receipt, onClose, design }: ReceiptPrev
                 Date: {formatDate(receipt.date)}
               </Typography>
             )}
+            {receipt.cashierName && (
+              <Typography variant="caption" sx={{ color: "text.secondary", display: "block" }}>
+                Cashier: {receipt.cashierName}
+              </Typography>
+            )}
           </Box>
         )}
 

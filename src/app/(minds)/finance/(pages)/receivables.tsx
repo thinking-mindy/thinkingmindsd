@@ -55,14 +55,14 @@ import {
   Edit,
 } from "@mui/icons-material";
 import { useUser } from "@/lib/auth/client";
-import { getInvoicesByOrg, createInvoice, updateInvoice } from "@/lib/desktop/finance-bridge";
+import { getInvoicesByOrg, createInvoice, updateInvoice, getPaymentsByOrg } from "@/lib/desktop/finance-bridge";
 import { formatCurrency } from "@/lib/format-currency";
 import { FlatCard } from "@/components/FlatCard";
 import { getSchoolStudentsWithBalances } from "@/lib/desktop/school-bridge";
 
 type ReceivableRow = {
   _id: string;
-  source: "invoice" | "school_fee";
+  source: "invoice" | "school_fee" | "pos" | "cashier";
   customerName?: string;
   customerEmail?: string;
   description?: string;
@@ -74,6 +74,8 @@ type ReceivableRow = {
   studentNumber?: string;
   className?: string;
   termLabel?: string;
+  createdAt?: string | Date;
+  receivedBy?: string;
 };
 import {
   BarChart,
@@ -90,6 +92,26 @@ import {
   LineChart,
   Line,
 } from "recharts";
+
+function mapPaymentToReceivable(payment: Record<string, any>): ReceivableRow | null {
+  const source = payment.sourceType;
+  if (source !== "pos" && source !== "cashier") return null;
+  if (payment.status !== "completed") return null;
+  const amount = Number(payment.amount ?? 0);
+  if (amount <= 0) return null;
+  return {
+    _id: `payment-${payment._id}`,
+    source,
+    customerName: source === "pos" ? "POS sale" : "Cashier sale",
+    description: payment.notes || payment.transactionId || payment.reference,
+    total: amount,
+    remaining: 0,
+    dueDate: payment.createdAt,
+    createdAt: payment.createdAt,
+    status: "collected",
+    receivedBy: payment.receivedBy,
+  };
+}
 
 function mapSchoolToReceivable(student: Record<string, any>): ReceivableRow | null {
   const balance = student.feeBalance;
@@ -117,6 +139,7 @@ export default function ReceivablesTab() {
   const [refreshing, setRefreshing] = useState(false);
   const [invoices, setInvoices] = useState<any[]>([]);
   const [schoolReceivables, setSchoolReceivables] = useState<ReceivableRow[]>([]);
+  const [cashCollections, setCashCollections] = useState<ReceivableRow[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -143,9 +166,10 @@ export default function ReceivablesTab() {
     if (showRefresh) setRefreshing(true);
     else setLoading(true);
     try {
-      const [invoiceRes, schoolRes] = await Promise.all([
+      const [invoiceRes, schoolRes, paymentsRes] = await Promise.all([
         getInvoicesByOrg(orgId),
         getSchoolStudentsWithBalances(orgId),
+        getPaymentsByOrg(orgId),
       ]);
       if (invoiceRes.success) setInvoices(invoiceRes.data || []);
       if (schoolRes.success) {
@@ -153,6 +177,12 @@ export default function ReceivablesTab() {
           .map((s: Record<string, unknown>) => mapSchoolToReceivable(s as Record<string, any>))
           .filter(Boolean) as ReceivableRow[];
         setSchoolReceivables(rows);
+      }
+      if (paymentsRes.success) {
+        const rows = (paymentsRes.data || [])
+          .map((p: Record<string, unknown>) => mapPaymentToReceivable(p as Record<string, any>))
+          .filter(Boolean) as ReceivableRow[];
+        setCashCollections(rows);
       }
     } catch (error) {
       console.error('Error loading invoices:', error);
@@ -215,6 +245,8 @@ export default function ReceivablesTab() {
         return 'default';
       case 'outstanding':
         return 'warning';
+      case 'collected':
+        return 'success';
       default:
         return 'warning';
     }
@@ -230,6 +262,8 @@ export default function ReceivablesTab() {
         return <Warning fontSize="small" />;
       case 'outstanding':
         return <Warning fontSize="small" />;
+      case 'collected':
+        return <CheckCircle fontSize="small" />;
       case 'draft':
         return <Edit fontSize="small" />;
       default:
@@ -249,8 +283,8 @@ export default function ReceivablesTab() {
       status: inv.status ?? "draft",
       invoiceId: String(inv.invoiceId ?? inv._id ?? ""),
     }));
-    return [...invoiceRows, ...schoolReceivables];
-  }, [invoices, schoolReceivables]);
+    return [...invoiceRows, ...schoolReceivables, ...cashCollections];
+  }, [invoices, schoolReceivables, cashCollections]);
 
   // Calculate summary statistics
   const summary = useMemo(() => {
@@ -280,21 +314,23 @@ export default function ReceivablesTab() {
     const paidAmount = allInvoices
       .filter((inv: any) => inv.status === 'paid')
       .reduce((sum: number, inv: any) => sum + (inv.total || 0), 0);
+    const cashCollected = cashCollections.reduce((sum, row) => sum + Number(row.total ?? 0), 0);
     
     return {
       totalReceivables,
       overdueAmount,
       thisMonthTotal,
-      paidAmount,
-      totalCount: allInvoices.length,
+      paidAmount: paidAmount + cashCollected,
+      totalCount: allInvoices.length + cashCollections.length,
       overdueCount: allInvoices.filter((inv: any) => {
         const dueDate = new Date(inv.dueDate);
         return inv.status !== 'paid' && dueDate < now;
       }).length,
-      paidCount: allInvoices.filter((inv: any) => inv.status === 'paid').length,
+      paidCount: allInvoices.filter((inv: any) => inv.status === 'paid').length + cashCollections.length,
       schoolOutstandingCount: schoolReceivables.length,
+      cashCollected,
     };
-  }, [invoices, schoolReceivables]);
+  }, [invoices, schoolReceivables, cashCollections]);
 
   // Status breakdown
   const statusData = useMemo(() => {
@@ -631,6 +667,7 @@ export default function ReceivablesTab() {
               </Typography>
               <Typography variant="caption" color="text.secondary" fontWeight={600}>
                 {filteredReceivables.length} {filteredReceivables.length === 1 ? 'record' : 'records'} found
+                {cashCollections.length > 0 ? ` · ${cashCollections.length} POS/cashier collection${cashCollections.length === 1 ? '' : 's'}` : ''}
                 {schoolReceivables.length > 0 ? ` · ${schoolReceivables.length} school fee balance${schoolReceivables.length === 1 ? '' : 's'}` : ''}
               </Typography>
             </Box>
@@ -667,6 +704,7 @@ export default function ReceivablesTab() {
                   <MenuItem value="paid">Paid</MenuItem>
                   <MenuItem value="overdue">Overdue</MenuItem>
                   <MenuItem value="outstanding">School outstanding</MenuItem>
+                  <MenuItem value="collected">POS / Cashier collected</MenuItem>
                 </Select>
               </FormControl>
             </Stack>
@@ -705,6 +743,7 @@ export default function ReceivablesTab() {
                 {filteredReceivables.length > 0 ? (
                   filteredReceivables.map((row, index) => {
                     const isSchool = row.source === "school_fee";
+                    const isCashSale = row.source === "pos" || row.source === "cashier";
                     const isOverdue =
                       !isSchool &&
                       row.dueDate &&
@@ -726,10 +765,22 @@ export default function ReceivablesTab() {
                       >
                         <TableCell>
                           <Typography variant="body2" fontWeight={700} color="primary.main">
-                            {isSchool ? row.studentNumber : `#${(row.invoiceId ?? row._id).slice(-8)}`}
+                            {isSchool
+                              ? row.studentNumber
+                              : isCashSale
+                                ? row.description || (row.source === "pos" ? "POS" : "Cashier")
+                                : `#${(row.invoiceId ?? row._id).slice(-8)}`}
                           </Typography>
                           {isSchool && (
                             <Chip label="School fees" size="small" sx={{ mt: 0.5, height: 20, fontSize: "0.65rem" }} />
+                          )}
+                          {isCashSale && (
+                            <Chip
+                              label={row.source === "pos" ? "POS" : "Cashier"}
+                              size="small"
+                              color={row.source === "pos" ? "primary" : "secondary"}
+                              sx={{ mt: 0.5, height: 20, fontSize: "0.65rem" }}
+                            />
                           )}
                         </TableCell>
                         <TableCell>
@@ -737,9 +788,9 @@ export default function ReceivablesTab() {
                             <Typography variant="body2" fontWeight={600}>
                               {row.customerName || 'N/A'}
                             </Typography>
-                            {(row.customerEmail || row.description) && (
+                            {(row.customerEmail || row.description || row.receivedBy) && (
                               <Typography variant="caption" color="text.secondary">
-                                {isSchool ? row.description : row.customerEmail}
+                                {isSchool ? row.description : isCashSale ? row.receivedBy || row.description : row.customerEmail}
                               </Typography>
                             )}
                           </Box>
@@ -749,9 +800,11 @@ export default function ReceivablesTab() {
                             <Typography variant="body2" fontWeight={600}>
                               {isSchool
                                 ? row.termLabel || "Current term"
-                                : row.dueDate
-                                  ? new Date(row.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-                                  : "—"}
+                                : isCashSale && row.createdAt
+                                  ? new Date(row.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                                  : row.dueDate
+                                    ? new Date(row.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                                    : "—"}
                             </Typography>
                             {isOverdue && (
                               <Chip
@@ -791,10 +844,10 @@ export default function ReceivablesTab() {
                               gap: 0.25,
                               p: 1,
                               borderRadius: 2,
-                              bgcolor: alpha(isSchool ? '#ff9800' : '#2196f3', 0.1),
+                              bgcolor: alpha(isSchool ? '#ff9800' : isCashSale ? '#4caf50' : '#2196f3', 0.1),
                             }}
                           >
-                            <Typography variant="h6" fontWeight={800} color={isSchool ? "warning.main" : "info.main"} component="span">
+                            <Typography variant="h6" fontWeight={800} color={isSchool ? "warning.main" : isCashSale ? "success.main" : "info.main"} component="span">
                               {formatCurrency(displayAmount)}
                             </Typography>
                             {isSchool && (

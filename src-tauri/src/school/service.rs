@@ -9,7 +9,7 @@ use crate::auth::session::SessionState;
 use crate::db::{self, store};
 use crate::school::school_term::compute_term_fee_balance;
 use crate::state::AppState;
-use crate::store_util::{action_err, action_ok, iso_now, now_ms, parse_iso_ms, read_org_docs};
+use crate::store_util::{action_err, action_ok, in_date_range, iso_now, now_ms, read_org_docs};
 
 const SETTINGS: &str = "school_settings";
 const CLASSES: &str = "school_classes";
@@ -811,13 +811,19 @@ pub fn get_school_dashboard_stats(
         Ok(v) => v,
         Err(e) => return action_err(e),
     };
-    let payments = match read_org_docs(app, CASHIER_TRANSACTIONS, org_id) {
-        Ok(v) => v
-            .into_iter()
-            .filter(|tx| tx.get("isSchoolPayment").and_then(|v| v.as_bool()) == Some(true))
-            .collect::<Vec<_>>(),
+    let payments: Vec<Value> = match read_org_docs(app, CASHIER_TRANSACTIONS, org_id) {
+        Ok(v) => v,
         Err(e) => return action_err(e),
-    };
+    }
+    .into_iter()
+    .filter(|tx| {
+        tx.get("isSchoolPayment").and_then(|v| v.as_bool()) == Some(true)
+            || crate::school::school_term::is_school_payment_type(
+                tx.get("paymentTypeId").and_then(|v| v.as_str()),
+                tx.get("paymentType").and_then(|v| v.as_str()),
+            )
+    })
+    .collect();
     let settings = match load_school_settings(app, org_id) {
         Ok(v) => v,
         Err(e) => return action_err(e),
@@ -849,16 +855,11 @@ pub fn get_school_dashboard_stats(
         .collect::<Vec<_>>();
 
     let month_start_ms = month_start_ms(now_ms());
+    let month_end_ms = now_ms();
     let fees_this_month = payments
         .iter()
-        .filter(|p| {
-            p.get("createdAt")
-                .and_then(|v| v.as_str())
-                .and_then(parse_iso_ms)
-                .map(|ms| ms >= month_start_ms)
-                .unwrap_or(false)
-        })
-        .fold(0.0_f64, |acc, p| acc + p.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0));
+        .filter(|p| in_date_range(p, "createdAt", Some(month_start_ms), Some(month_end_ms)))
+        .fold(0.0_f64, |acc, p| acc + p.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0).abs());
 
     action_ok(json!({
         "totalStudents": students.len(),

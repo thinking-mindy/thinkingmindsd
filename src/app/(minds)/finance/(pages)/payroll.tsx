@@ -63,16 +63,16 @@ import {
   CalendarToday,
   Payment,
 } from "@mui/icons-material";
-import { useUser } from "@/lib/auth/client";
+import { FlatCard, statIconSx } from "@/components/FlatCard";
 import {
-  getPayrollRecordsByOrg,
+  getPayrollRecordsForCurrentOrg,
   createPayrollRecord,
   updatePayrollRecord,
   deletePayrollRecord,
-  getPayrollRecordsByPeriod,
+  getOrgMembersForHR,
 } from "@/lib/desktop/payroll-bridge";
 import { formatCurrency, formatUsd } from "@/lib/format-currency";
-import { getMembers } from "@/lib/desktop/users-bridge";
+import { calculateZwUsdMonthly, payrollRecordNet } from "@/lib/zw-payroll";
 import {
   BarChart,
   Bar,
@@ -89,7 +89,6 @@ import {
   Line,
 } from "recharts";
 import type { PayrollRecord } from "@/types/database";
-import { FlatCard, statIconSx } from "@/components/FlatCard";
 
 const StyledTableRow = styled(TableRow)(({ theme }) => ({
   transition: 'all 0.2s ease',
@@ -105,7 +104,6 @@ const StyledTableRow = styled(TableRow)(({ theme }) => ({
 }));
 
 export default function PayrollTab() {
-  const { user } = useUser();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [payrollRecords, setPayrollRecords] = useState<any[]>([]);
@@ -130,25 +128,23 @@ export default function PayrollTab() {
 
   useEffect(() => {
     loadData();
-  }, [user]);
+  }, []);
 
   const loadData = async (showRefresh = false) => {
-    if (!user?.publicMetadata?.companyId) return;
     if (showRefresh) setRefreshing(true);
     else setLoading(true);
     try {
-      const orgId = user.publicMetadata.companyId as string;
       const [payrollRes, employeesRes] = await Promise.all([
-        getPayrollRecordsByOrg(orgId),
-        getMembers(),
+        getPayrollRecordsForCurrentOrg(),
+        getOrgMembersForHR(),
       ]);
-      
+
       if (payrollRes.success) {
         setPayrollRecords(payrollRes.data || []);
       }
-      
-      if (employeesRes?.aye) {
-        setEmployees(employeesRes.aye || []);
+
+      if (employeesRes.success) {
+        setEmployees(employeesRes.data || []);
       }
     } catch (error) {
       console.error('Error loading payroll data:', error);
@@ -159,35 +155,58 @@ export default function PayrollTab() {
     }
   };
 
+  const zwPreview = useMemo(() => {
+    const gross = parseFloat(formData.gross || "0");
+    if (!gross) return null;
+    return calculateZwUsdMonthly(gross);
+  }, [formData.gross]);
+
+  const applyZwToForm = (gross: number) => {
+    const zw = calculateZwUsdMonthly(gross);
+    setFormData((f) => ({
+      ...f,
+      gross: String(gross),
+      tax: String(zw.paye + zw.aidsLevy),
+      insurance: String(zw.nssaEmployee),
+      retirement: "",
+      other: "",
+    }));
+  };
+
   const handleCreate = async () => {
-    if (!user?.publicMetadata?.companyId || !formData.employeeId || !formData.payPeriod || !formData.gross) {
+    if (!formData.employeeId || !formData.payPeriod || !formData.gross) {
       setSnackbar({ open: true, message: 'Please fill in all required fields', severity: 'error' });
       return;
     }
 
     try {
-      const orgId = user.publicMetadata.companyId as string;
       const employeeId = formData.employeeId;
       const gross = parseFloat(formData.gross);
-      const tax = parseFloat(formData.tax || '0');
-      const insurance = parseFloat(formData.insurance || '0');
-      const retirement = parseFloat(formData.retirement || '0');
-      const other = parseFloat(formData.other || '0');
-      const totalDeductions = tax + insurance + retirement + other;
-      const net = gross - totalDeductions;
+      const zw = calculateZwUsdMonthly(gross);
+      const employee = employees.find((e: { id?: string }) => e.id === employeeId);
 
       const result = await createPayrollRecord({
-        orgId: orgId as any,
-        employeeId: employeeId as any,
+        employeeId,
+        employeeName: employee?.name,
         payPeriod: formData.payPeriod,
+        payrollCountry: "ZW",
+        currency: "USD",
         gross,
         deductions: {
-          tax,
-          insurance: insurance > 0 ? insurance : undefined,
-          retirement: retirement > 0 ? retirement : undefined,
-          other: other > 0 ? other : undefined,
+          tax: zw.paye + zw.aidsLevy,
+          insurance: zw.nssaEmployee,
+          paye: zw.paye,
+          aidsLevy: zw.aidsLevy,
+          nssaEmployee: zw.nssaEmployee,
+          nssaEmployer: zw.nssaEmployer,
         },
-        net,
+        zwPaye: zw.paye,
+        zwAidsLevy: zw.aidsLevy,
+        zwNssaEmployee: zw.nssaEmployee,
+        zwNssaEmployer: zw.nssaEmployer,
+        employerCost: zw.employerCost,
+        net: zw.net,
+        netPay: zw.net,
       });
 
       if (result.success) {
@@ -211,24 +230,29 @@ export default function PayrollTab() {
 
     try {
       const gross = parseFloat(formData.gross);
-      const tax = parseFloat(formData.tax || '0');
-      const insurance = parseFloat(formData.insurance || '0');
-      const retirement = parseFloat(formData.retirement || '0');
-      const other = parseFloat(formData.other || '0');
-      const totalDeductions = tax + insurance + retirement + other;
-      const net = gross - totalDeductions;
+      const zw = calculateZwUsdMonthly(gross);
 
       const result = await updatePayrollRecord(selectedRecord._id, {
-        employeeId: formData.employeeId as any,
+        employeeId: formData.employeeId,
         payPeriod: formData.payPeriod,
+        payrollCountry: "ZW",
+        currency: "USD",
         gross,
         deductions: {
-          tax,
-          insurance: insurance > 0 ? insurance : undefined,
-          retirement: retirement > 0 ? retirement : undefined,
-          other: other > 0 ? other : undefined,
+          tax: zw.paye + zw.aidsLevy,
+          insurance: zw.nssaEmployee,
+          paye: zw.paye,
+          aidsLevy: zw.aidsLevy,
+          nssaEmployee: zw.nssaEmployee,
+          nssaEmployer: zw.nssaEmployer,
         },
-        net,
+        zwPaye: zw.paye,
+        zwAidsLevy: zw.aidsLevy,
+        zwNssaEmployee: zw.nssaEmployee,
+        zwNssaEmployer: zw.nssaEmployer,
+        employerCost: zw.employerCost,
+        net: zw.net,
+        netPay: zw.net,
       });
 
       if (result.success) {
@@ -277,14 +301,16 @@ export default function PayrollTab() {
 
   const handleEdit = (record: any) => {
     setSelectedRecord(record);
+    const gross = parseFloat(record.gross?.toString() || "0");
+    const zw = gross > 0 ? calculateZwUsdMonthly(gross) : null;
     setFormData({
-      employeeId: record.employeeId?.toString() || '',
-      payPeriod: record.payPeriod || '',
-      gross: record.gross?.toString() || '',
-      tax: record.deductions?.tax?.toString() || '',
-      insurance: record.deductions?.insurance?.toString() || '',
-      retirement: record.deductions?.retirement?.toString() || '',
-      other: record.deductions?.other?.toString() || '',
+      employeeId: record.employeeId?.toString() || "",
+      payPeriod: record.payPeriod || "",
+      gross: record.gross?.toString() || "",
+      tax: String(zw ? zw.paye + zw.aidsLevy : record.deductions?.tax ?? ""),
+      insurance: String(zw ? zw.nssaEmployee : record.deductions?.insurance ?? ""),
+      retirement: "",
+      other: "",
     });
     setEditDialogOpen(true);
   };
@@ -294,14 +320,10 @@ export default function PayrollTab() {
     setDeleteDialogOpen(true);
   };
 
-  const getEmployeeName = (employeeId: string | any) => {
+  const getEmployeeName = (employeeId: string | { toString(): string }) => {
     const id = employeeId?.toString();
-    const employee = employees.find((emp: any) => 
-      emp._id?.toString() === id || 
-      emp.id === id ||
-      emp.clerkId === id
-    );
-    return employee?.name || employee?.email || employee?.firstName || 'Unknown Employee';
+    const employee = employees.find((emp: { id?: string }) => emp.id === id);
+    return employee?.name || employee?.email || 'Unknown Employee';
   };
 
   // Calculate summary statistics
@@ -312,7 +334,7 @@ export default function PayrollTab() {
       return sum + (deductions.tax || 0) + (deductions.insurance || 0) + 
              (deductions.retirement || 0) + (deductions.other || 0);
     }, 0);
-    const totalNet = payrollRecords.reduce((sum, record) => sum + (record.net || 0), 0);
+    const totalNet = payrollRecords.reduce((sum, record) => sum + payrollRecordNet(record), 0);
     const recordCount = payrollRecords.length;
     const uniqueEmployees = new Set(payrollRecords.map((r: any) => r.employeeId?.toString())).size;
 
@@ -451,7 +473,7 @@ export default function PayrollTab() {
             Payroll Management
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Manage employee payroll records, deductions, and financial accounting
+            Zimbabwe USD payroll — ZIMRA PAYE, NSSA & AIDS levy auto-calculated. Salaries post to Finance expenses.
           </Typography>
         </Box>
         <Stack direction="row" spacing={2} flexWrap="wrap">
@@ -864,9 +886,9 @@ export default function PayrollTab() {
                 label="Employee"
                 onChange={(e) => setFormData({ ...formData, employeeId: e.target.value })}
               >
-                {employees.map((emp: any) => (
-                  <MenuItem key={emp._id?.toString() || emp.id || emp.clerkId} value={emp._id?.toString() || emp.id || emp.clerkId}>
-                    {emp.name || emp.email || emp.firstName || 'Unknown'}
+                {employees.map((emp: { id: string; name: string; email?: string }) => (
+                  <MenuItem key={emp.id} value={emp.id}>
+                    {emp.name || emp.email || 'Unknown'}
                   </MenuItem>
                 ))}
               </Select>
@@ -883,58 +905,37 @@ export default function PayrollTab() {
 
             <TextField
               fullWidth
-              label="Gross Pay"
+              label="Gross Pay (USD monthly)"
               type="number"
               value={formData.gross}
-              onChange={(e) => setFormData({ ...formData, gross: e.target.value })}
+              onChange={(e) => applyZwToForm(parseFloat(e.target.value || "0"))}
               InputProps={{
                 startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
               }}
+              helperText="Zimbabwe statutory deductions applied automatically"
             />
 
-            <Divider>Deductions</Divider>
+            <Divider>Zimbabwe deductions (auto)</Divider>
 
             <TextField
               fullWidth
-              label="Tax"
+              label="PAYE + AIDS levy"
               type="number"
               value={formData.tax}
-              onChange={(e) => setFormData({ ...formData, tax: e.target.value })}
               InputProps={{
                 startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
+                readOnly: true,
               }}
             />
 
             <TextField
               fullWidth
-              label="Insurance"
+              label="NSSA (employee)"
               type="number"
               value={formData.insurance}
-              onChange={(e) => setFormData({ ...formData, insurance: e.target.value })}
               InputProps={{
                 startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
-              }}
-            />
-
-            <TextField
-              fullWidth
-              label="Retirement"
-              type="number"
-              value={formData.retirement}
-              onChange={(e) => setFormData({ ...formData, retirement: e.target.value })}
-              InputProps={{
-                startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
-              }}
-            />
-
-            <TextField
-              fullWidth
-              label="Other Deductions"
-              type="number"
-              value={formData.other}
-              onChange={(e) => setFormData({ ...formData, other: e.target.value })}
-              InputProps={{
-                startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
+                readOnly: true,
               }}
             />
 
@@ -947,19 +948,24 @@ export default function PayrollTab() {
                 bgcolor: 'action.hover',
               }}
             >
-              <Stack direction="row" justifyContent="space-between" alignItems="center">
-                <Typography variant="body1" fontWeight={600} color="text.secondary">
-                  Calculated Net Pay:
-                </Typography>
-                <Typography variant="h5" fontWeight={800} color="text.primary">
-                  {formatUsd(
-                    parseFloat(formData.gross || '0') -
-                    parseFloat(formData.tax || '0') -
-                    parseFloat(formData.insurance || '0') -
-                    parseFloat(formData.retirement || '0') -
-                    parseFloat(formData.other || '0')
-                  )}
-                </Typography>
+              <Stack spacing={0.5}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center">
+                  <Typography variant="body1" fontWeight={600} color="text.secondary">
+                    Calculated Net Pay:
+                  </Typography>
+                  <Typography variant="h5" fontWeight={800} color="text.primary">
+                    {formatUsd(zwPreview?.net ?? (
+                      parseFloat(formData.gross || '0') -
+                      parseFloat(formData.tax || '0') -
+                      parseFloat(formData.insurance || '0')
+                    ))}
+                  </Typography>
+                </Stack>
+                {zwPreview && (
+                  <Typography variant="caption" color="text.secondary">
+                    Employer cost {formatUsd(zwPreview.employerCost)} incl. NSSA employer
+                  </Typography>
+                )}
               </Stack>
             </Box>
           </Stack>
@@ -996,9 +1002,9 @@ export default function PayrollTab() {
                 label="Employee"
                 onChange={(e) => setFormData({ ...formData, employeeId: e.target.value })}
               >
-                {employees.map((emp: any) => (
-                  <MenuItem key={emp._id?.toString() || emp.id || emp.clerkId} value={emp._id?.toString() || emp.id || emp.clerkId}>
-                    {emp.name || emp.email || emp.firstName || 'Unknown'}
+                {employees.map((emp: { id: string; name: string; email?: string }) => (
+                  <MenuItem key={emp.id} value={emp.id}>
+                    {emp.name || emp.email || 'Unknown'}
                   </MenuItem>
                 ))}
               </Select>
@@ -1014,58 +1020,36 @@ export default function PayrollTab() {
 
             <TextField
               fullWidth
-              label="Gross Pay"
+              label="Gross Pay (USD monthly)"
               type="number"
               value={formData.gross}
-              onChange={(e) => setFormData({ ...formData, gross: e.target.value })}
+              onChange={(e) => applyZwToForm(parseFloat(e.target.value || "0"))}
               InputProps={{
                 startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
               }}
             />
 
-            <Divider>Deductions</Divider>
+            <Divider>Zimbabwe deductions (auto)</Divider>
 
             <TextField
               fullWidth
-              label="Tax"
+              label="PAYE + AIDS levy"
               type="number"
               value={formData.tax}
-              onChange={(e) => setFormData({ ...formData, tax: e.target.value })}
               InputProps={{
                 startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
+                readOnly: true,
               }}
             />
 
             <TextField
               fullWidth
-              label="Insurance"
+              label="NSSA (employee)"
               type="number"
               value={formData.insurance}
-              onChange={(e) => setFormData({ ...formData, insurance: e.target.value })}
               InputProps={{
                 startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
-              }}
-            />
-
-            <TextField
-              fullWidth
-              label="Retirement"
-              type="number"
-              value={formData.retirement}
-              onChange={(e) => setFormData({ ...formData, retirement: e.target.value })}
-              InputProps={{
-                startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
-              }}
-            />
-
-            <TextField
-              fullWidth
-              label="Other Deductions"
-              type="number"
-              value={formData.other}
-              onChange={(e) => setFormData({ ...formData, other: e.target.value })}
-              InputProps={{
-                startAdornment: <Typography sx={{ mr: 1 }}>$</Typography>,
+                readOnly: true,
               }}
             />
 
@@ -1078,19 +1062,20 @@ export default function PayrollTab() {
                 bgcolor: 'action.hover',
               }}
             >
-              <Stack direction="row" justifyContent="space-between" alignItems="center">
-                <Typography variant="body1" fontWeight={600} color="text.secondary">
-                  Calculated Net Pay:
-                </Typography>
-                <Typography variant="h5" fontWeight={800} color="text.primary">
-                  {formatUsd(
-                    parseFloat(formData.gross || '0') -
-                    parseFloat(formData.tax || '0') -
-                    parseFloat(formData.insurance || '0') -
-                    parseFloat(formData.retirement || '0') -
-                    parseFloat(formData.other || '0')
-                  )}
-                </Typography>
+              <Stack spacing={0.5}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center">
+                  <Typography variant="body1" fontWeight={600} color="text.secondary">
+                    Calculated Net Pay:
+                  </Typography>
+                  <Typography variant="h5" fontWeight={800} color="text.primary">
+                    {formatUsd(zwPreview?.net ?? 0)}
+                  </Typography>
+                </Stack>
+                {zwPreview && (
+                  <Typography variant="caption" color="text.secondary">
+                    Employer cost {formatUsd(zwPreview.employerCost)} incl. NSSA employer
+                  </Typography>
+                )}
               </Stack>
             </Box>
           </Stack>

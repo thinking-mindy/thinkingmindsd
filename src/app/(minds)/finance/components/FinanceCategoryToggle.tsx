@@ -1,9 +1,9 @@
 "use client";
 
 import { ToggleButton, ToggleButtonGroup, alpha } from "@mui/material";
-import { MenuBook, PointOfSale } from "@mui/icons-material";
+import { MenuBook, PointOfSale, SchoolOutlined } from "@mui/icons-material";
 
-export type FinanceCategory = "ops" | "ledger";
+export type FinanceCategory = "ops" | "ledger" | "schools";
 
 type Props = {
   value: FinanceCategory;
@@ -45,6 +45,10 @@ export default function FinanceCategoryToggle({ value, onChange }: Props) {
       <ToggleButton value="ledger">
         <MenuBook sx={{ fontSize: 18 }} />
         General ledger
+      </ToggleButton>
+      <ToggleButton value="schools">
+        <SchoolOutlined sx={{ fontSize: 18 }} />
+        Schools
       </ToggleButton>
     </ToggleButtonGroup>
   );

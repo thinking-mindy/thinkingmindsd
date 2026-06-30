@@ -39,6 +39,7 @@ import {
   WbSunnyOutlined,
 } from "@mui/icons-material";
 import { useUser } from "@/lib/auth/client";
+import { getCashierDisplayName } from "@/lib/cashier-display-name";
 import CreateTransactionDialog from "./components/CreateTransactionDialog";
 import CashierStatCards, { type CashierMetrics } from "./components/CashierStatCards";
 import CashierBreakdown from "./components/CashierBreakdown";
@@ -47,12 +48,12 @@ import CashierReceiptDialog from "./components/CashierReceiptDialog";
 import type { CashierDraft, CashierTxnType } from "./components/CashierSidebar";
 import {
   createCashierTransaction,
-  getCashierTransactionsFiltered,
+  getCashierTransactions,
   getFinanceSettings,
 } from "@/lib/desktop/finance-bridge";
 import { getSchoolStudents } from "@/lib/desktop/school-bridge";
 import type { SchoolStudent } from "@/types/school";
-import { DEFAULT_FINANCE_SETTINGS, partitionPaymentTypes } from "@/lib/finance-shared";
+import { DEFAULT_FINANCE_SETTINGS, partitionPaymentTypes, isSchoolPaymentType } from "@/lib/finance-shared";
 import type { FinanceAccountCategory, FinancePaymentType } from "@/types/database";
 
 const PageRoot = styled(Box)(({ theme }) => ({
@@ -121,6 +122,27 @@ function formatDate(d: string | Date) {
   }).format(new Date(d));
 }
 
+function txInDateRange(
+  createdAt: string | Date | undefined,
+  startDate: string,
+  endDate: string
+): boolean {
+  if (!createdAt) return true;
+  const when = new Date(createdAt);
+  if (Number.isNaN(when.getTime())) return true;
+  if (startDate) {
+    const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+    if (when < start) return false;
+  }
+  if (endDate) {
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+    if (when > end) return false;
+  }
+  return true;
+}
+
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -151,9 +173,8 @@ function exportCsv(rows: Record<string, any>[]) {
 
 export default function CashierPage() {
   const theme = useTheme();
-  const { user } = useUser();
+  const { user, isLoaded } = useUser();
   const orgId = user?.publicMetadata?.companyId as string | undefined;
-  const cashierId = user?.id;
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -192,19 +213,15 @@ export default function CashierPage() {
   const [showFilters, setShowFilters] = useState(true);
   const [clock, setClock] = useState("");
 
-  const [filterStartDate, setFilterStartDate] = useState(todayIso());
-  const [filterEndDate, setFilterEndDate] = useState(todayIso());
+  const [filterStartDate, setFilterStartDate] = useState("");
+  const [filterEndDate, setFilterEndDate] = useState("");
   const [filterCategoryId, setFilterCategoryId] = useState("all");
   const [filterPaymentTypeId, setFilterPaymentTypeId] = useState("all");
 
   const selectedCategory = categories.find((c) => c.id === selectedCategoryId) ?? null;
   const selectedPaymentType = paymentTypes.find((p) => p.id === selectedPaymentTypeId) ?? null;
 
-  const cashierName =
-    user?.firstName ||
-    user?.fullName?.split(" ")[0] ||
-    user?.primaryEmailAddress?.emailAddress?.split("@")[0] ||
-    "Cashier";
+  const cashierName = getCashierDisplayName(user);
 
   useEffect(() => {
     const tick = () =>
@@ -250,48 +267,49 @@ export default function CashierPage() {
 
   const loadTransactions = useCallback(
     async (showRefresh = false) => {
-      if (!orgId || !cashierId) return;
+      if (!isLoaded) return;
       if (showRefresh) setRefreshing(true);
       else setLoading(true);
       try {
-        const start = filterStartDate ? new Date(filterStartDate) : undefined;
-        if (start) start.setHours(0, 0, 0, 0);
-        const end = filterEndDate ? new Date(filterEndDate) : undefined;
-        const txRes = await getCashierTransactionsFiltered({
-          orgId,
-          cashierId,
-          startDate: start,
-          endDate: end,
-          limit: 1000,
-        });
-        if (txRes.success) setTransactions(txRes.data || []);
+        const txRes = await getCashierTransactions();
+        if (txRes.success) {
+          setTransactions(txRes.data || []);
+        } else {
+          setTransactions([]);
+          setSnackbar({
+            open: true,
+            message: txRes.error || "Failed to load cashier payments",
+            severity: "error",
+          });
+        }
+      } catch {
+        setTransactions([]);
+        setSnackbar({ open: true, message: "Failed to load cashier payments", severity: "error" });
       } finally {
         setLoading(false);
         setRefreshing(false);
       }
     },
-    [orgId, cashierId, filterStartDate, filterEndDate]
+    [isLoaded]
   );
 
   useEffect(() => {
-    const init = async () => {
-      setLoading(true);
-      await loadSettings();
-      await loadStudents();
-      await loadTransactions();
-    };
-    init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orgId, cashierId]);
+    if (!isLoaded) return;
+    void loadTransactions();
+  }, [isLoaded, loadTransactions]);
 
   useEffect(() => {
-    if (!loading) loadTransactions(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterStartDate, filterEndDate]);
+    if (!isLoaded) return;
+    void loadSettings();
+    void loadStudents();
+  }, [isLoaded, loadSettings, loadStudents]);
 
   const filteredTransactions = useMemo(() => {
     const q = search.trim().toLowerCase();
     return transactions.filter((tx) => {
+      if (filterStartDate || filterEndDate) {
+        if (!txInDateRange(tx.createdAt, filterStartDate, filterEndDate)) return false;
+      }
       if (filterCategoryId !== "all" && tx.accountCategoryId !== filterCategoryId) return false;
       if (filterPaymentTypeId !== "all" && tx.paymentTypeId !== filterPaymentTypeId) return false;
       if (filterType !== "all" && tx.type !== filterType) return false;
@@ -305,7 +323,7 @@ export default function CashierPage() {
         tx.accountCategory?.toLowerCase().includes(q)
       );
     });
-  }, [transactions, filterCategoryId, filterPaymentTypeId, filterType, search]);
+  }, [transactions, filterStartDate, filterEndDate, filterCategoryId, filterPaymentTypeId, filterType, search]);
 
   const metrics = useMemo((): CashierMetrics & { byCategory: { label: string; value: number }[]; byPaymentType: { label: string; value: number }[] } => {
     let sales = 0;
@@ -340,8 +358,11 @@ export default function CashierPage() {
 
   const handleRecord = async () => {
     if (!orgId || !selectedCategory || !selectedPaymentType || !draft.amount) return;
-    if (draft.isSchoolPayment && !draft.studentId) return;
+    if ((draft.isSchoolPayment || isSchoolPaymentType(selectedPaymentType)) && !draft.studentId) return;
     const student = students.find((s) => s._id === draft.studentId);
+    const isSchoolPayment =
+      Boolean(draft.isSchoolPayment) ||
+      (Boolean(draft.studentId) && isSchoolPaymentType(selectedPaymentType));
     setSubmitting(true);
     try {
       const result = await createCashierTransaction({
@@ -350,7 +371,7 @@ export default function CashierPage() {
         amount: parseFloat(draft.amount),
         description:
           draft.description ||
-          (draft.isSchoolPayment && student
+          (isSchoolPayment && student
             ? `School fee · ${student.firstName} ${student.lastName}`
             : `${selectedPaymentType.name} · ${selectedCategory.name}`),
         reference: draft.reference,
@@ -359,11 +380,12 @@ export default function CashierPage() {
         paymentTypeId: selectedPaymentType.id,
         paymentType: selectedPaymentType.name,
         currency: "USD",
-        isSchoolPayment: draft.isSchoolPayment || undefined,
-        studentId: draft.isSchoolPayment ? draft.studentId : undefined,
-        studentNumber: draft.isSchoolPayment ? student?.studentNumber : undefined,
-        studentName: draft.isSchoolPayment && student ? `${student.firstName} ${student.lastName}` : undefined,
-        className: draft.isSchoolPayment ? student?.className : undefined,
+        isSchoolPayment: isSchoolPayment || undefined,
+        studentId: isSchoolPayment ? draft.studentId : undefined,
+        studentNumber: isSchoolPayment ? student?.studentNumber : undefined,
+        studentName: isSchoolPayment && student ? `${student.firstName} ${student.lastName}` : undefined,
+        className: isSchoolPayment ? student?.className : undefined,
+        cashierName,
       });
       if (result.success) {
         setSnackbar({ open: true, message: "Payment recorded successfully", severity: "success" });

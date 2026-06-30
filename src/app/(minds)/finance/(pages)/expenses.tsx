@@ -728,15 +728,18 @@ export default function ExpensesTab() {
                         </Typography>
                       </TableCell>
                       <TableCell>
-                        <Chip
-                          label={expense.category}
-                          size="small"
-                          sx={{
-                            bgcolor: 'action.hover',
-                            color: 'text.secondary',
-                            fontWeight: 600,
-                          }}
-                        />
+                        <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
+                          <Chip
+                            label={expense.category}
+                            size="small"
+                            sx={{
+                              bgcolor: 'action.hover',
+                            }}
+                          />
+                          {expense.sourceType === 'payroll' && (
+                            <Chip label="From payroll" size="small" color="secondary" variant="outlined" />
+                          )}
+                        </Stack>
                       </TableCell>
                       <TableCell>
                         <Typography variant="body2" sx={{ maxWidth: 300 }}>

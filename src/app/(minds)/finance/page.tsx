@@ -17,6 +17,8 @@ import {
   SettingsOutlined,
   SyncAltOutlined,
   TrendingUpOutlined,
+  SchoolOutlined,
+  WarningAmberOutlined,
 } from "@mui/icons-material";
 import ModuleShell from "@/components/ModuleShell";
 import type { ModuleTab } from "@/components/ModuleShell";
@@ -25,6 +27,7 @@ import { useUser } from "@/lib/auth/client";
 import FinanceCategoryToggle, { type FinanceCategory } from "./components/FinanceCategoryToggle";
 import FinanceBridgeBar from "./components/FinanceBridgeBar";
 import { useFinancePageData } from "./hooks/useFinancePageData";
+import { useSchoolFinanceStats } from "./hooks/useSchoolFinanceStats";
 import DashboardTab from "./(pages)/dashboard";
 import PaymentsTab from "./(pages)/payments";
 import ReceivablesTab from "./(pages)/receivables";
@@ -35,6 +38,9 @@ import ReportsTab from "./(pages)/reports";
 import ConfigurationTab from "./(pages)/configuration";
 import LedgerAccountingPanel from "./(pages)/accounting-ledger";
 import LedgerSettingsTab from "./(pages)/ledger-settings";
+import SchoolsDashboardTab from "./(pages)/schools-dashboard";
+import SchoolCollectionsTab from "./(pages)/school-collections";
+import SchoolOutstandingTab from "./(pages)/school-outstanding";
 
 const OPS_TABS: Omit<ModuleTab, "id">[] = [
   { label: "Dashboard", description: "Cashflow overview", icon: <DashboardOutlined /> },
@@ -55,6 +61,12 @@ const LEDGER_TABS: Omit<ModuleTab, "id">[] = [
   { label: "Settings", description: "Basis & auto-post", icon: <SettingsOutlined /> },
 ];
 
+const SCHOOL_TABS: Omit<ModuleTab, "id">[] = [
+  { label: "Dashboard", description: "Fees & collections", icon: <DashboardOutlined /> },
+  { label: "Collections", description: "Payment ledger", icon: <ReceiptLongOutlined /> },
+  { label: "Outstanding", description: "Unpaid term fees", icon: <WarningAmberOutlined /> },
+];
+
 export default function FinanceDashboard() {
   const { user } = useUser();
   const orgId = user?.publicMetadata?.companyId as string | undefined;
@@ -62,8 +74,10 @@ export default function FinanceDashboard() {
   const [category, setCategory] = useState<FinanceCategory>("ops");
   const [opsTab, setOpsTab] = useState(0);
   const [ledgerTab, setLedgerTab] = useState(0);
+  const [schoolTab, setSchoolTab] = useState(0);
 
   const data = useFinancePageData(orgId);
+  const schoolStats = useSchoolFinanceStats(orgId, category === "schools");
 
   const handleCategoryChange = useCallback((next: FinanceCategory) => {
     setCategory(next);
@@ -79,6 +93,9 @@ export default function FinanceDashboard() {
     if (category === "ops") {
       return OPS_TABS.map((t, id) => ({ ...t, id }));
     }
+    if (category === "schools") {
+      return SCHOOL_TABS.map((t, id) => ({ ...t, id }));
+    }
     return LEDGER_TABS.map((t, id) => ({
       ...t,
       id,
@@ -86,8 +103,9 @@ export default function FinanceDashboard() {
     }));
   }, [category, data.journals.length]);
 
-  const tabIndex = category === "ops" ? opsTab : ledgerTab;
-  const onTabChange = category === "ops" ? setOpsTab : setLedgerTab;
+  const tabIndex = category === "ops" ? opsTab : category === "schools" ? schoolTab : ledgerTab;
+  const onTabChange =
+    category === "ops" ? setOpsTab : category === "schools" ? setSchoolTab : setLedgerTab;
 
   const statCards = useMemo(() => {
     if (category === "ops") {
@@ -118,6 +136,33 @@ export default function FinanceDashboard() {
       ];
     }
 
+    if (category === "schools") {
+      const s = schoolStats.stats;
+      return [
+        {
+          label: "Fees received (term)",
+          value: formatCurrency(s.total),
+          icon: <SchoolOutlined />,
+        },
+        {
+          label: "Tuition",
+          value: formatCurrency(s.tuition),
+          icon: <ReceiptLongOutlined />,
+        },
+        {
+          label: "Transport",
+          value: formatCurrency(s.transport),
+          icon: <PaymentOutlined />,
+        },
+        {
+          label: "Outstanding",
+          value: formatCurrency(s.outstanding),
+          icon: <WarningAmberOutlined />,
+          pulse: s.outstanding > 0,
+        },
+      ];
+    }
+
     const glRev = data.statements?.incomeStatement?.revenue ?? 0;
     const glExp = data.statements?.incomeStatement?.expenses ?? 0;
     const glNet = data.glNet;
@@ -139,7 +184,7 @@ export default function FinanceDashboard() {
         icon: <AccountBalanceOutlined />,
       },
     ];
-  }, [category, data]);
+  }, [category, data, schoolStats.stats]);
 
   const ledgerViews = ["overview", "journal", "coa", "reconcile"] as const;
 
@@ -154,18 +199,26 @@ export default function FinanceDashboard() {
   return (
     <Box sx={{ width: "100%", minHeight: "100vh", py: 3, px: { xs: 2, md: 4 } }}>
       <ModuleShell
-        overline={category === "ops" ? "Operations accounting" : "General ledger"}
+        overline={
+          category === "ops"
+            ? "Operations accounting"
+            : category === "schools"
+              ? "School accounting"
+              : "General ledger"
+        }
         title="Finance"
         subtitle={
           category === "ops"
             ? "Run the business — invoices, payments, payroll, expenses, and ops reporting."
-            : "The books — double-entry ledger, financial statements, and reconciliation."
+            : category === "schools"
+              ? "School fees — tuition, transport, uniform collections, and outstanding balances."
+              : "The books — double-entry ledger, financial statements, and reconciliation."
         }
         heroIcon={<AccountBalanceOutlined sx={{ fontSize: 30 }} />}
         heroChips={<FinanceCategoryToggle value={category} onChange={handleCategoryChange} />}
         statCards={statCards}
         alertSlot={
-          <>
+          category !== "schools" ? (
             <FinanceBridgeBar
               opsNet={data.opsNet}
               glNet={data.glNet}
@@ -174,7 +227,7 @@ export default function FinanceDashboard() {
               onSync={() => void handleSync()}
               onRefresh={() => void data.refresh()}
             />
-          </>
+          ) : undefined
         }
         tabIndex={tabIndex}
         onTabChange={onTabChange}
@@ -206,6 +259,14 @@ export default function FinanceDashboard() {
               />
             )}
             {ledgerTab === 4 && <LedgerSettingsTab />}
+          </>
+        )}
+
+        {category === "schools" && (
+          <>
+            {schoolTab === 0 && <SchoolsDashboardTab />}
+            {schoolTab === 1 && <SchoolCollectionsTab />}
+            {schoolTab === 2 && <SchoolOutstandingTab />}
           </>
         )}
       </ModuleShell>

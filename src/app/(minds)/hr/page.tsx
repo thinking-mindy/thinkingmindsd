@@ -43,6 +43,10 @@ import {
   PeopleOutlined,
   RefreshOutlined,
   AddOutlined,
+  AccountBalanceWalletOutlined,
+  GavelOutlined,
+  HealthAndSafetyOutlined,
+  TrendingUpOutlined,
 } from "@mui/icons-material";
 import {
   ArcElement,
@@ -58,7 +62,6 @@ import { LocalizationProvider } from "@mui/x-date-pickers";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import dayjs, { type Dayjs } from "dayjs";
-import { useUser } from "@/lib/auth/client";
 import Link from "next/link";
 import {
   createLeaveRequest,
@@ -68,6 +71,7 @@ import {
   type LeaveRequest,
 } from "@/lib/desktop/payroll-bridge";
 import { getOrgMembersForHR, getPayrollRecordsForCurrentOrg, type HREmployee } from "@/lib/desktop/payroll-bridge";
+import { payrollRecordNet } from "@/lib/zw-payroll";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, ChartTooltip, Legend);
 
@@ -139,15 +143,28 @@ function leaveStatusColor(status?: string): "default" | "warning" | "success" | 
   return "warning";
 }
 
+type PayrollRow = {
+  gross?: number;
+  net?: number;
+  netPay?: number;
+  payPeriod?: string;
+  employeeName?: string;
+  employeeId?: string;
+  zwPaye?: number;
+  zwNssaEmployee?: number;
+  zwNssaEmployer?: number;
+  employerCost?: number;
+  deductions?: { paye?: number; tax?: number; insurance?: number };
+};
+
 const LEAVE_TYPES = ["Annual", "Sick", "Personal", "Maternity", "Paternity", "Unpaid"] as const;
 
 export default function HRPage() {
-  const { user } = useUser();
   const [tab, setTab] = useState(0);
   const [loading, setLoading] = useState(true);
   const [employees, setEmployees] = useState<HREmployee[]>([]);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRow[]>([]);
-  const [payrollTotal, setPayrollTotal] = useState(0);
+  const [payrollRecords, setPayrollRecords] = useState<PayrollRow[]>([]);
   const [search, setSearch] = useState("");
   const [leaveFilter, setLeaveFilter] = useState("all");
   const [snackbar, setSnackbar] = useState<{
@@ -171,10 +188,6 @@ export default function HRPage() {
   );
 
   const load = useCallback(async () => {
-    if (!user?.publicMetadata?.companyId) {
-      setLoading(false);
-      return;
-    }
     setLoading(true);
     try {
       const [empRes, leaveRes, payrollRes] = await Promise.all([
@@ -184,16 +197,13 @@ export default function HRPage() {
       ]);
       if (empRes.success) setEmployees(empRes.data || []);
       if (leaveRes.success) setLeaveRequests((leaveRes.data as unknown as LeaveRow[]) || []);
-      if (payrollRes.success) {
-        const records = (payrollRes.data as { net?: number }[]) || [];
-        setPayrollTotal(records.reduce((s, r) => s + (r.net || 0), 0));
-      }
+      if (payrollRes.success) setPayrollRecords((payrollRes.data as PayrollRow[]) || []);
     } catch {
       setSnackbar({ open: true, message: "Failed to load HR data", severity: "error" });
     } finally {
       setLoading(false);
     }
-  }, [user?.publicMetadata?.companyId]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -203,14 +213,35 @@ export default function HRPage() {
     const pending = leaveRequests.filter((l) => l.status === "Pending").length;
     const onLeave = leaveRequests.filter((l) => l.status === "Approved").length;
     const departments = new Set(employees.map((e) => e.department).filter(Boolean)).size;
+    const grossPayroll = payrollRecords.reduce((s, r) => s + (r.gross || 0), 0);
+    const netPayroll = payrollRecords.reduce((s, r) => s + payrollRecordNet(r), 0);
+    const payeTotal = payrollRecords.reduce(
+      (s, r) => s + (r.zwPaye ?? r.deductions?.paye ?? r.deductions?.tax ?? 0),
+      0
+    );
+    const nssaTotal = payrollRecords.reduce(
+      (s, r) => s + (r.zwNssaEmployee ?? r.deductions?.insurance ?? 0),
+      0
+    );
+    const employerCost = payrollRecords.reduce(
+      (s, r) => s + (r.employerCost ?? (r.gross || 0) + (r.zwNssaEmployer || 0)),
+      0
+    );
+    const avgGross = employees.length ? grossPayroll / Math.max(payrollRecords.length, 1) : 0;
     return {
       employees: employees.length,
       departments,
       pendingLeave: pending,
       approvedLeave: onLeave,
-      payrollTotal,
+      grossPayroll,
+      netPayroll,
+      payeTotal,
+      nssaTotal,
+      employerCost,
+      avgGross,
+      payrollRuns: payrollRecords.length,
     };
-  }, [employees, leaveRequests, payrollTotal]);
+  }, [employees, leaveRequests, payrollRecords]);
 
   const filteredEmployees = useMemo(() => {
     if (!search.trim()) return employees;
@@ -259,6 +290,19 @@ export default function HRPage() {
     };
   }, [employees]);
 
+  const payrollChart = useMemo(() => {
+    const buckets = [
+      { label: "Gross", value: kpis.grossPayroll, color: "#0AA775" },
+      { label: "PAYE", value: kpis.payeTotal, color: "#f44336" },
+      { label: "NSSA", value: kpis.nssaTotal, color: "#2196f3" },
+      { label: "Net paid", value: kpis.netPayroll, color: "#9c27b0" },
+    ].filter((b) => b.value > 0);
+    return {
+      labels: buckets.map((b) => b.label),
+      datasets: [{ data: buckets.map((b) => b.value), backgroundColor: buckets.map((b) => b.color), borderWidth: 0 }],
+    };
+  }, [kpis]);
+
   const leaveChart = useMemo(() => {
     const buckets = [
       { label: "Pending", value: leaveRequests.filter((l) => l.status === "Pending").length, color: "#ff9800" },
@@ -272,13 +316,12 @@ export default function HRPage() {
   }, [leaveRequests]);
 
   const saveLeave = async () => {
-    if (!user?.publicMetadata?.companyId || !leaveForm.employeeId || !leaveForm.startDate || !leaveForm.endDate) {
+    if (!leaveForm.employeeId || !leaveForm.startDate || !leaveForm.endDate) {
       setSnackbar({ open: true, message: "Employee and dates are required", severity: "error" });
       return;
     }
     const days = Math.max(1, leaveForm.endDate.diff(leaveForm.startDate, "day") + 1);
     const res = await createLeaveRequest({
-      orgId: user.publicMetadata.companyId as string,
       employeeId: leaveForm.employeeId,
       leaveType: leaveForm.leaveType,
       status: "Pending",
@@ -364,14 +407,21 @@ export default function HRPage() {
               spacing={2}
             >
               <Box>
-                <Typography variant="overline" color="text.secondary">
-                  People operations
-                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                  <Typography variant="overline" color="text.secondary">
+                    People operations
+                  </Typography>
+                  <Chip
+                    size="small"
+                    label="Zimbabwe USD payroll"
+                    sx={{ fontWeight: 700, bgcolor: alpha("#0AA775", 0.12), color: "#0AA775" }}
+                  />
+                </Stack>
                 <Typography variant="h4" fontWeight={800}>
                   HR & Payroll
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                  Employee directory, leave management, and workforce overview.
+                  Workforce KPIs with ZIMRA PAYE, NSSA, and AIDS levy — salaries flow to Finance expenses.
                 </Typography>
               </Box>
               <Stack direction="row" spacing={1} flexWrap="wrap">
@@ -416,18 +466,55 @@ export default function HRPage() {
           </Card>
 
           <Grid container spacing={1.5}>
-            <Grid size={{ xs: 6, sm: 4, md: 2.4 }}>
-              <StatTile label="Employees" value={String(kpis.employees)} icon={<PeopleOutlined sx={{ fontSize: 20 }} />} />
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+              <StatTile label="Headcount" value={String(kpis.employees)} icon={<PeopleOutlined sx={{ fontSize: 20 }} />} />
             </Grid>
-            <Grid size={{ xs: 6, sm: 4, md: 2.4 }}>
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
               <StatTile
-                label="Departments"
-                value={String(kpis.departments)}
-                icon={<PeopleOutlined sx={{ fontSize: 20 }} />}
+                label="Gross payroll"
+                value={fmt(kpis.grossPayroll)}
+                sub={`${kpis.payrollRuns} run${kpis.payrollRuns === 1 ? "" : "s"}`}
+                icon={<TrendingUpOutlined sx={{ fontSize: 20 }} />}
+                color="#0AA775"
+              />
+            </Grid>
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+              <StatTile
+                label="Net paid"
+                value={fmt(kpis.netPayroll)}
+                sub="Take-home"
+                icon={<AccountBalanceWalletOutlined sx={{ fontSize: 20 }} />}
+                color="#9c27b0"
+              />
+            </Grid>
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+              <StatTile
+                label="Employer cost"
+                value={fmt(kpis.employerCost)}
+                sub="Gross + NSSA employer"
+                icon={<TrendingUpOutlined sx={{ fontSize: 20 }} />}
+                color="#673ab7"
+              />
+            </Grid>
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+              <StatTile
+                label="PAYE + AIDS"
+                value={fmt(kpis.payeTotal)}
+                sub="Statutory tax"
+                icon={<GavelOutlined sx={{ fontSize: 20 }} />}
+                color="#f44336"
+              />
+            </Grid>
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+              <StatTile
+                label="NSSA (employee)"
+                value={fmt(kpis.nssaTotal)}
+                sub="4.5% capped"
+                icon={<HealthAndSafetyOutlined sx={{ fontSize: 20 }} />}
                 color="#2196f3"
               />
             </Grid>
-            <Grid size={{ xs: 6, sm: 4, md: 2.4 }}>
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
               <StatTile
                 label="Pending leave"
                 value={String(kpis.pendingLeave)}
@@ -435,21 +522,13 @@ export default function HRPage() {
                 color="#ff9800"
               />
             </Grid>
-            <Grid size={{ xs: 6, sm: 4, md: 2.4 }}>
+            <Grid size={{ xs: 6, sm: 4, md: 3 }}>
               <StatTile
-                label="Approved leave"
-                value={String(kpis.approvedLeave)}
+                label="Avg gross / run"
+                value={fmt(kpis.avgGross)}
+                sub={kpis.departments ? `${kpis.departments} dept` : "No dept set"}
                 icon={<CheckCircleOutlined sx={{ fontSize: 20 }} />}
-                color="#0AA775"
-              />
-            </Grid>
-            <Grid size={{ xs: 6, sm: 4, md: 2.4 }}>
-              <StatTile
-                label="Payroll processed"
-                value={fmt(kpis.payrollTotal)}
-                sub="Total net paid"
-                icon={<PeopleOutlined sx={{ fontSize: 20 }} />}
-                color="#9c27b0"
+                color="#607d8b"
               />
             </Grid>
           </Grid>
@@ -466,12 +545,12 @@ export default function HRPage() {
 
           {tab === 0 && (
             <Grid container spacing={2}>
-              <Grid size={{ xs: 12, md: 5 }}>
-                <Card variant="outlined" sx={{ borderRadius: 3, p: 2 }}>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <Card variant="outlined" sx={{ borderRadius: 3, p: 2, height: "100%" }}>
                   <Typography variant="subtitle1" fontWeight={700} gutterBottom>
                     Employees by role
                   </Typography>
-                  <Box sx={{ height: 260, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Box sx={{ height: 240, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {roleChart.labels.length ? (
                       <Doughnut
                         data={roleChart}
@@ -485,12 +564,36 @@ export default function HRPage() {
                   </Box>
                 </Card>
               </Grid>
-              <Grid size={{ xs: 12, md: 7 }}>
-                <Card variant="outlined" sx={{ borderRadius: 3, p: 2 }}>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <Card variant="outlined" sx={{ borderRadius: 3, p: 2, height: "100%" }}>
                   <Typography variant="subtitle1" fontWeight={700} gutterBottom>
-                    Leave requests by status
+                    Payroll breakdown (ZW)
                   </Typography>
-                  <Box sx={{ height: 260 }}>
+                  <Box sx={{ height: 240, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {payrollChart.labels.length ? (
+                      <Doughnut
+                        data={payrollChart}
+                        options={{ plugins: { legend: { position: "bottom" } }, maintainAspectRatio: false }}
+                      />
+                    ) : (
+                      <Stack spacing={1} alignItems="center">
+                        <Typography variant="body2" color="text.secondary" align="center">
+                          No payroll runs yet.
+                        </Typography>
+                        <Button component={Link} href="/finance" size="small" variant="outlined">
+                          Run payroll in Finance
+                        </Button>
+                      </Stack>
+                    )}
+                  </Box>
+                </Card>
+              </Grid>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <Card variant="outlined" sx={{ borderRadius: 3, p: 2, height: "100%" }}>
+                  <Typography variant="subtitle1" fontWeight={700} gutterBottom>
+                    Leave pipeline
+                  </Typography>
+                  <Box sx={{ height: 240 }}>
                     {leaveChart.labels.length ? (
                       <Bar
                         data={{
@@ -520,6 +623,43 @@ export default function HRPage() {
                   </Box>
                 </Card>
               </Grid>
+              {payrollRecords.length > 0 && (
+                <Grid size={{ xs: 12 }}>
+                  <Card variant="outlined" sx={{ borderRadius: 3, overflow: "hidden" }}>
+                    <Box sx={{ p: 2, borderBottom: 1, borderColor: "divider" }}>
+                      <Typography variant="subtitle1" fontWeight={700}>
+                        Recent payroll runs
+                      </Typography>
+                    </Box>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Period</TableCell>
+                          <TableCell>Employee</TableCell>
+                          <TableCell align="right">Gross</TableCell>
+                          <TableCell align="right">PAYE</TableCell>
+                          <TableCell align="right">NSSA</TableCell>
+                          <TableCell align="right">Net</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {payrollRecords.slice(0, 5).map((r, i) => (
+                          <TableRow key={i} hover>
+                            <TableCell>{r.payPeriod || "—"}</TableCell>
+                            <TableCell>{r.employeeName || employeeName(r.employeeId) || "—"}</TableCell>
+                            <TableCell align="right">{fmt(r.gross || 0)}</TableCell>
+                            <TableCell align="right">{fmt(r.zwPaye ?? r.deductions?.paye ?? 0)}</TableCell>
+                            <TableCell align="right">{fmt(r.zwNssaEmployee ?? r.deductions?.insurance ?? 0)}</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 700 }}>
+                              {fmt(payrollRecordNet(r))}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </Card>
+                </Grid>
+              )}
             </Grid>
           )}
 

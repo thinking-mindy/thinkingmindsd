@@ -1,4 +1,5 @@
 import type { Receipt } from "@/app/(minds)/pos/types";
+import { isTuitionPaymentType } from "@/lib/finance-shared";
 
 export type CashierReceiptSource = {
   _id?: string;
@@ -8,6 +9,7 @@ export type CashierReceiptSource = {
   description?: string;
   reference?: string;
   paymentType?: string;
+  paymentTypeId?: string;
   accountCategory?: string;
   paymentMethod?: string;
   isSchoolPayment?: boolean;
@@ -15,6 +17,7 @@ export type CashierReceiptSource = {
   studentNumber?: string;
   studentName?: string;
   className?: string;
+  cashierName?: string;
   schoolTermId?: string;
   schoolTermLabel?: string;
   termFeesTotal?: number;
@@ -35,42 +38,85 @@ function mapPaymentMethod(method?: string): "cash" | "paynow" | "card" {
   return "cash";
 }
 
+/** Fix receipts saved before the current payment was included in the fee snapshot. */
+export function enrichSchoolFeeSnapshot(tx: CashierReceiptSource): CashierReceiptSource {
+  if (!tx.isSchoolPayment || !tx.studentId) return tx;
+
+  const paymentType = {
+    id: String(tx.paymentTypeId ?? ""),
+    name: String(tx.paymentType ?? ""),
+  };
+  if (!isTuitionPaymentType(paymentType)) return tx;
+
+  const total = Number(tx.termFeesTotal ?? 0);
+  if (total <= 0) return tx;
+
+  const paymentAmount = Math.abs(Number(tx.amount ?? 0));
+  if (paymentAmount <= 0 || tx.type === "refund" || tx.type === "withdrawal") return tx;
+
+  let paid = Number(tx.termFeesPaid ?? 0);
+  let remaining = Number(tx.termFeesRemaining ?? 0);
+
+  // Pre-payment snapshots satisfy paid + remaining ≈ total (current payment not yet applied).
+  const looksPrePayment =
+    Math.abs(paid + remaining - total) < 0.02 && remaining >= paymentAmount - 0.02;
+
+  if (looksPrePayment) {
+    paid += paymentAmount;
+    remaining = Math.max(0, total - paid);
+  }
+
+  return {
+    ...tx,
+    termFeesPaid: paid,
+    termFeesRemaining: remaining,
+  };
+}
+
 export function cashierTransactionToReceipt(tx: CashierReceiptSource): Receipt {
-  const amount = Math.abs(tx.amount || 0);
-  const typeLabel = TYPE_LABELS[tx.type ?? ""] ?? tx.type ?? "Payment";
+  const enriched = enrichSchoolFeeSnapshot(tx);
+  const amount = Math.abs(enriched.amount || 0);
+  const typeLabel = TYPE_LABELS[enriched.type ?? ""] ?? enriched.type ?? "Payment";
   const studentNote =
-    tx.isSchoolPayment && tx.studentName
-      ? `Student: ${tx.studentName}${tx.studentNumber ? ` (${tx.studentNumber})` : ""}${tx.className ? ` · ${tx.className}` : ""}`
+    enriched.isSchoolPayment && enriched.studentName
+      ? `Student: ${enriched.studentName}${enriched.studentNumber ? ` (${enriched.studentNumber})` : ""}${enriched.className ? ` · ${enriched.className}` : ""}`
       : null;
   const lineName =
-    tx.description?.trim() ||
-    [studentNote, tx.paymentType, typeLabel, tx.accountCategory].filter(Boolean).join(" · ");
+    enriched.description?.trim() ||
+    [studentNote, enriched.paymentType, typeLabel, enriched.accountCategory].filter(Boolean).join(" · ");
 
-  const method = mapPaymentMethod(tx.paymentMethod);
+  const method = mapPaymentMethod(enriched.paymentMethod);
   const id =
-    tx.reference?.trim() ||
-    (tx._id ? `CASH-${String(tx._id).slice(-8).toUpperCase()}` : `CASH-${Date.now()}`);
+    enriched.reference?.trim() ||
+    (enriched._id ? `CASH-${String(enriched._id).slice(-8).toUpperCase()}` : `CASH-${Date.now()}`);
 
   const date =
-    tx.createdAt instanceof Date
-      ? tx.createdAt.toISOString()
-      : tx.createdAt
-        ? new Date(tx.createdAt).toISOString()
+    enriched.createdAt instanceof Date
+      ? enriched.createdAt.toISOString()
+      : enriched.createdAt
+        ? new Date(enriched.createdAt).toISOString()
         : new Date().toISOString();
 
-  const termFeesTotal = Number(tx.termFeesTotal ?? 0);
-  const termFeesPaid = Number(tx.termFeesPaid ?? 0);
-  const termFeesRemaining = Number(tx.termFeesRemaining ?? 0);
-  const isSchool = Boolean(tx.isSchoolPayment && tx.studentId);
-  const hasSchoolFeeSummary = isSchool && termFeesTotal > 0;
+  const termFeesTotal = Number(enriched.termFeesTotal ?? 0);
+  const termFeesPaid = Number(enriched.termFeesPaid ?? 0);
+  const termFeesRemaining = Number(enriched.termFeesRemaining ?? 0);
+  const isSchool = Boolean(enriched.isSchoolPayment && enriched.studentId);
+  const showTuitionStatement =
+    isSchool &&
+    termFeesTotal > 0 &&
+    isTuitionPaymentType({
+      id: String(enriched.paymentTypeId ?? ""),
+      name: String(enriched.paymentType ?? ""),
+    });
 
   return {
     id,
     date,
+    cashierName: enriched.cashierName?.trim() || undefined,
     entries: [
       {
         item: {
-          id: String(tx._id ?? id),
+          id: String(enriched._id ?? id),
           name: lineName,
           price: amount,
           img: "",
@@ -83,17 +129,17 @@ export function cashierTransactionToReceipt(tx: CashierReceiptSource): Receipt {
     total: amount,
     payment: {
       method,
-      paidAmount: tx.type === "refund" || tx.type === "withdrawal" ? undefined : amount,
-      reference: tx.reference || undefined,
-      paynowNumber: method === "paynow" && tx.reference ? tx.reference : undefined,
-      cardReference: method === "card" && tx.reference ? tx.reference : undefined,
+      paidAmount: enriched.type === "refund" || enriched.type === "withdrawal" ? undefined : amount,
+      reference: enriched.reference || undefined,
+      paynowNumber: method === "paynow" && enriched.reference ? enriched.reference : undefined,
+      cardReference: method === "card" && enriched.reference ? enriched.reference : undefined,
     },
-    schoolFee: hasSchoolFeeSummary
+    schoolFee: showTuitionStatement
       ? {
-          studentNumber: tx.studentNumber,
-          studentName: tx.studentName,
-          className: tx.className,
-          termLabel: tx.schoolTermLabel ?? "Current term",
+          studentNumber: enriched.studentNumber,
+          studentName: enriched.studentName,
+          className: enriched.className,
+          termLabel: enriched.schoolTermLabel ?? "Current term",
           termFeesTotal,
           paidThisTerm: termFeesPaid,
           remainingBalance: termFeesRemaining,
