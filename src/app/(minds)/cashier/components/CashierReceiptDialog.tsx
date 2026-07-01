@@ -24,17 +24,7 @@ function needsFeeLookup(tx: CashierReceiptSource): boolean {
     name: String(tx.paymentType ?? ""),
   };
   if (!isTuitionPaymentType(paymentType)) return false;
-  if (Number(tx.termFeesTotal ?? 0) <= 0) return true;
-  const enriched = enrichSchoolFeeSnapshot(tx);
-  const paymentAmount = Math.abs(Number(tx.amount ?? 0));
-  const total = Number(tx.termFeesTotal ?? 0);
-  const paid = Number(tx.termFeesPaid ?? 0);
-  const remaining = Number(tx.termFeesRemaining ?? 0);
-  return (
-    paymentAmount > 0 &&
-    Math.abs(paid + remaining - total) < 0.02 &&
-    Math.abs(Number(enriched.termFeesPaid ?? 0) - paid) < 0.02
-  );
+  return Number(tx.termFeesTotal ?? 0) <= 0;
 }
 
 export default function CashierReceiptDialog({

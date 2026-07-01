@@ -33,6 +33,7 @@ import {
   classifySchoolPayment,
   isSchoolCollectionTx,
   normalizeSchoolPaymentTx,
+  parseSchoolTxDate,
   signedSchoolAmount,
   type SchoolPaymentCategory,
   type SchoolPaymentTx,
@@ -92,7 +93,9 @@ export default function SchoolCollectionsTab() {
 
   const filtered = useMemo(() => {
     let list = [...rows].sort(
-      (a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime()
+      (a, b) =>
+        (parseSchoolTxDate(b.createdAt)?.getTime() ?? 0) -
+        (parseSchoolTxDate(a.createdAt)?.getTime() ?? 0)
     );
     if (categoryFilter !== "all") {
       list = list.filter((tx) => classifySchoolPayment(tx) === categoryFilter);
@@ -223,13 +226,13 @@ export default function SchoolCollectionsTab() {
                       <TableRow key={String(tx._id)} hover>
                         <TableCell>
                           {tx.createdAt
-                            ? new Date(tx.createdAt).toLocaleString("en-US", {
+                            ? (parseSchoolTxDate(tx.createdAt)?.toLocaleString("en-US", {
                                 month: "short",
                                 day: "numeric",
                                 year: "numeric",
                                 hour: "2-digit",
                                 minute: "2-digit",
-                              })
+                              }) ?? "—")
                             : "—"}
                         </TableCell>
                         <TableCell>

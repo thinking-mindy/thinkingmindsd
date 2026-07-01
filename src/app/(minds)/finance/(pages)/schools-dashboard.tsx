@@ -41,15 +41,17 @@ import { FlatCard, statIconSx } from "@/components/FlatCard";
 import {
   aggregateSchoolPayments,
   classifySchoolPayment,
-  inDateRange,
+  getCurrentSchoolTerm,
   isSchoolCollectionTx,
   mapStudentBalances,
   normalizeSchoolPaymentTx,
   parseSchoolTxDate,
+  schoolPaymentMatchesPeriod,
   schoolPaymentsByMonth,
   signedSchoolAmount,
   summarizeOutstanding,
   type SchoolPaymentTx,
+  type SchoolPeriod,
 } from "@/lib/school-finance";
 import {
   Bar,
@@ -72,7 +74,7 @@ const FEE_COLORS = {
   other: "#607d8b",
 };
 
-type PeriodKey = "month" | "term" | "year";
+type PeriodKey = SchoolPeriod;
 
 function getPeriodRange(period: PeriodKey): { start: Date; end: Date; label: string } {
   const now = new Date();
@@ -90,11 +92,10 @@ function getPeriodRange(period: PeriodKey): { start: Date; end: Date; label: str
       label: "This year",
     };
   }
-  const month = now.getMonth();
-  const termStartMonth = month < 4 ? 0 : month < 8 ? 4 : 8;
+  const term = getCurrentSchoolTerm(now);
   return {
-    start: new Date(now.getFullYear(), termStartMonth, 1),
-    end: now,
+    start: term.start,
+    end: term.end,
     label: "Current term",
   };
 }
@@ -201,8 +202,8 @@ export default function SchoolsDashboardTab() {
   const { start, end, label: periodLabel } = useMemo(() => getPeriodRange(period), [period]);
 
   const aggregates = useMemo(
-    () => aggregateSchoolPayments(transactions, start, end),
-    [transactions, start, end]
+    () => aggregateSchoolPayments(transactions, start, end, period),
+    [transactions, start, end, period]
   );
 
   const outstanding = useMemo(() => summarizeOutstanding(studentBalances), [studentBalances]);
@@ -225,14 +226,14 @@ export default function SchoolsDashboardTab() {
   const recentPayments = useMemo(
     () =>
       [...transactions]
-        .filter((tx) => inDateRange(tx.createdAt, start, end))
+        .filter((tx) => schoolPaymentMatchesPeriod(tx, period, start, end))
         .sort(
           (a, b) =>
             (parseSchoolTxDate(b.createdAt)?.getTime() ?? 0) -
             (parseSchoolTxDate(a.createdAt)?.getTime() ?? 0)
         )
         .slice(0, 8),
-    [transactions, start, end]
+    [transactions, start, end, period]
   );
 
   if (loading) {

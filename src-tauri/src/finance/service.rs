@@ -7,8 +7,8 @@ use crate::auth::session::SessionState;
 use crate::db::{self, store};
 use crate::state::AppState;
 use crate::store_util::{
-    action_err, action_ok, delete_doc_by_id, in_date_range, insert_org_doc, iso_now, now_ms,
-    parse_iso_ms, read_org_docs, sum_field, update_doc_by_id,
+    action_err, action_ok, delete_doc_by_id, doc_date_ms, in_date_range, insert_org_doc, iso_now,
+    now_ms, parse_iso_ms, read_org_docs, sum_field, update_doc_by_id,
 };
 
 const INVOICES: &str = "invoices";
@@ -321,7 +321,7 @@ pub fn get_expenses_by_org(
     let mut rows = match read_org_docs(app, EXPENSES, &target_org) {
         Ok(v) => v
             .into_iter()
-            .filter(|d| in_date_range(d, "date", start_ms, end_ms))
+            .filter(|d| expense_in_date_range(d, start_ms, end_ms))
             .collect::<Vec<_>>(),
         Err(e) => return action_err(e),
     };
@@ -959,6 +959,10 @@ pub fn get_financial_summary(
         current_month_range_ms(now_ms())
     };
 
+    if let Err(e) = sync_payroll_expenses_for_org(app, &target_org) {
+        eprintln!("[finance] payroll expense sync failed: {e}");
+    }
+
     let invoices = read_org_docs(app, INVOICES, &target_org).unwrap_or_default();
     let expenses = read_org_docs(app, EXPENSES, &target_org).unwrap_or_default();
     let payments = read_org_docs(app, PAYMENTS, &target_org).unwrap_or_default();
@@ -991,7 +995,7 @@ pub fn get_financial_summary(
                 Some("approved") | Some("pending")
             )
         })
-        .filter(|e| in_date_range(e, "date", Some(range_start), Some(range_end)))
+        .filter(|e| expense_in_date_range(e, Some(range_start), Some(range_end)))
         .filter_map(|e| e.get("amount").and_then(|v| v.as_f64()))
         .sum::<f64>();
 
@@ -1087,7 +1091,7 @@ pub fn get_finance_monthly_trends(
                     Some("approved") | Some("pending")
                 )
             })
-            .filter(|e| in_date_range(e, "date", Some(start_ms), Some(end_ms)))
+            .filter(|e| expense_in_date_range(e, Some(start_ms), Some(end_ms)))
             .filter_map(|e| e.get("amount").and_then(|v| v.as_f64()))
             .sum::<f64>();
         rows.push(json!({
@@ -1191,6 +1195,37 @@ fn as_id(v: &Value) -> Option<String> {
         .and_then(|o| o.get("$oid"))
         .and_then(|x| x.as_str())
         .map(str::to_string)
+}
+
+fn expense_date_ms(doc: &Value) -> i64 {
+    let date_ms = doc_date_ms(doc, "date");
+    if date_ms > 0 {
+        return date_ms;
+    }
+    doc_date_ms(doc, "createdAt")
+}
+
+fn expense_in_date_range(doc: &Value, start_ms: Option<i64>, end_ms: Option<i64>) -> bool {
+    let mut ms = expense_date_ms(doc);
+    if ms > 0 {
+        let (year, _) = ms_to_ym(ms);
+        if year < 2000 {
+            ms = now_ms();
+        }
+    } else {
+        return true;
+    }
+    if let Some(s) = start_ms {
+        if ms < s {
+            return false;
+        }
+    }
+    if let Some(e) = end_ms {
+        if ms > e {
+            return false;
+        }
+    }
+    true
 }
 
 fn doc_when_ms(doc: &Value) -> i64 {
@@ -1569,15 +1604,34 @@ pub fn record_payroll_expense(app: &AppState, org_id: &str, record: &Value) -> R
         )),
     );
     doc.insert("currency".into(), json!("USD"));
-    if let Some(at) = record.get("createdAt") {
-        doc.insert("date".into(), at.clone());
-        doc.insert("createdAt".into(), at.clone());
-    } else {
-        let now = iso_now();
-        doc.insert("date".into(), json!(now));
-        doc.insert("createdAt".into(), json!(now));
-    }
+    let now = iso_now();
+    doc.insert("date".into(), json!(now));
+    doc.insert("createdAt".into(), json!(now));
     insert_org_doc(app, EXPENSES, org_id, doc)?;
+    Ok(())
+}
+
+fn repair_payroll_expense_dates(app: &AppState, org_id: &str) -> Result<(), String> {
+    let expenses = read_org_docs(app, EXPENSES, org_id)?;
+    let now = iso_now();
+    for exp in expenses {
+        if exp.get("sourceType").and_then(|v| v.as_str()) != Some("payroll") {
+            continue;
+        }
+        let ms = expense_date_ms(&exp);
+        let broken = ms == 0 || ms_to_ym(ms).0 < 2000;
+        if !broken {
+            continue;
+        }
+        let Some(id) = doc_id(&exp) else {
+            continue;
+        };
+        let mut patch = Map::new();
+        patch.insert("date".into(), json!(now));
+        patch.insert("createdAt".into(), json!(now));
+        patch.insert("updatedAt".into(), json!(now));
+        let _ = update_doc_by_id(app, EXPENSES, &id, patch);
+    }
     Ok(())
 }
 
@@ -1588,7 +1642,7 @@ pub fn sync_payroll_expenses_for_org(app: &AppState, org_id: &str) -> Result<(),
             eprintln!("[finance] payroll expense sync failed: {e}");
         }
     }
-    Ok(())
+    repair_payroll_expense_dates(app, org_id)
 }
 
 fn expense_source_exists(app: &AppState, org_id: &str, source_ref: &str) -> Result<bool, String> {

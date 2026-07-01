@@ -5,21 +5,13 @@ import { getCashierTransactionsFiltered } from "@/lib/desktop/finance-bridge";
 import { getSchoolStudentsWithBalances } from "@/lib/desktop/school-bridge";
 import {
   aggregateSchoolPayments,
+  getCurrentSchoolTerm,
   isSchoolCollectionTx,
   mapStudentBalances,
   normalizeSchoolPaymentTx,
   summarizeOutstanding,
   type SchoolPaymentTx,
 } from "@/lib/school-finance";
-
-function termRange(now = new Date()) {
-  const month = now.getMonth();
-  const termStartMonth = month < 4 ? 0 : month < 8 ? 4 : 8;
-  return {
-    start: new Date(now.getFullYear(), termStartMonth, 1),
-    end: now,
-  };
-}
 
 export function useSchoolFinanceStats(orgId?: string, enabled = false) {
   const [stats, setStats] = useState({
@@ -37,7 +29,7 @@ export function useSchoolFinanceStats(orgId?: string, enabled = false) {
     setLoading(true);
     try {
       const now = new Date();
-      const { start, end } = termRange(now);
+      const { start, end } = getCurrentSchoolTerm(now);
 
       const [txRes, studentsRes] = await Promise.all([
         getCashierTransactionsFiltered(orgId ? { orgId } : undefined),
@@ -46,17 +38,17 @@ export function useSchoolFinanceStats(orgId?: string, enabled = false) {
 
       const txs = ((txRes.success ? txRes.data : []) ?? []) as SchoolPaymentTx[];
       const schoolTxs = txs.map(normalizeSchoolPaymentTx).filter(isSchoolCollectionTx);
-      const monthAgg = aggregateSchoolPayments(schoolTxs, start, end);
+      const termAgg = aggregateSchoolPayments(schoolTxs, start, end, "term");
       const balances = mapStudentBalances(
         ((studentsRes.success ? studentsRes.data : []) ?? []) as Record<string, unknown>[]
       );
       const outstanding = summarizeOutstanding(balances);
 
       setStats({
-        tuition: monthAgg.tuition,
-        transport: monthAgg.transport,
-        uniform: monthAgg.uniform,
-        total: monthAgg.total,
+        tuition: termAgg.tuition,
+        transport: termAgg.transport,
+        uniform: termAgg.uniform,
+        total: termAgg.total,
         outstanding: outstanding.totalDue,
         collectionRate: outstanding.collectionRate,
       });

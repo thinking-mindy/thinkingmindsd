@@ -63,13 +63,33 @@ pub fn get_school_term_for_ms(ms: i64) -> SchoolTerm {
 
 pub fn transaction_in_term(tx: &Value, term: &SchoolTerm) -> bool {
     if let Some(term_id) = tx.get("schoolTermId").and_then(|v| v.as_str()) {
-        return term_id == term.id;
+        if term_id == term.id {
+            return true;
+        }
+        if let Some((_, suffix)) = term.id.rsplit_once('-') {
+            if !suffix.is_empty() && term_id.ends_with(suffix) {
+                return true;
+            }
+        }
+    }
+    if let Some(label) = tx.get("schoolTermLabel").and_then(|v| v.as_str()) {
+        let lower = label.to_lowercase();
+        if let Some((_, suffix)) = term.id.rsplit_once('-') {
+            let key = suffix.to_lowercase();
+            let term_num = key.trim_start_matches('t');
+            if lower.contains(&key) || lower.contains(&format!("term {term_num}")) {
+                return true;
+            }
+        }
     }
     let created = tx
         .get("createdAt")
         .and_then(|v| v.as_str())
         .and_then(parse_iso_ms)
         .unwrap_or(0);
+    if created == 0 {
+        return tx.get("isSchoolPayment").and_then(|v| v.as_bool()) == Some(true);
+    }
     created >= term.start_ms && created <= term.end_ms
 }
 

@@ -55,18 +55,79 @@ export function isSchoolCollectionTx(tx: SchoolPaymentTx): boolean {
   );
 }
 
+export type SchoolPeriod = "month" | "term" | "year" | "all";
+
+export type SchoolTermInfo = {
+  id: string;
+  termKey: "T1" | "T2" | "T3";
+  label: string;
+  start: Date;
+  end: Date;
+};
+
+/** Zimbabwe school calendar: T1 Jan–Apr, T2 May–Aug, T3 Sep–Dec. */
+export function getCurrentSchoolTerm(now = new Date()): SchoolTermInfo {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  if (m < 4) {
+    return {
+      id: `${y}-T1`,
+      termKey: "T1",
+      label: `Term 1 · Jan–Apr ${y}`,
+      start: new Date(y, 0, 1),
+      end: new Date(y, 3, 30, 23, 59, 59, 999),
+    };
+  }
+  if (m < 8) {
+    return {
+      id: `${y}-T2`,
+      termKey: "T2",
+      label: `Term 2 · May–Aug ${y}`,
+      start: new Date(y, 4, 1),
+      end: new Date(y, 7, 31, 23, 59, 59, 999),
+    };
+  }
+  return {
+    id: `${y}-T3`,
+    termKey: "T3",
+    label: `Term 3 · Sep–Dec ${y}`,
+    start: new Date(y, 8, 1),
+    end: new Date(y, 11, 31, 23, 59, 59, 999),
+  };
+}
+
+function repairSchoolTxDate(d: Date, now = new Date()): Date {
+  const y = d.getFullYear();
+  if (y >= 2000 && y <= 2100) return d;
+  // Legacy / bad clocks (e.g. year 56) — keep month/day in current calendar year
+  return new Date(
+    now.getFullYear(),
+    d.getMonth(),
+    d.getDate(),
+    d.getHours(),
+    d.getMinutes(),
+    d.getSeconds(),
+    d.getMilliseconds()
+  );
+}
+
 /** Parse cashier/school payment timestamps (ISO string, epoch ms, or Date). */
-export function parseSchoolTxDate(createdAt: string | Date | number | undefined): Date | null {
+export function parseSchoolTxDate(
+  createdAt: string | Date | number | undefined,
+  now = new Date()
+): Date | null {
   if (createdAt == null || createdAt === "") return null;
   if (createdAt instanceof Date) {
-    return Number.isNaN(createdAt.getTime()) ? null : createdAt;
+    return Number.isNaN(createdAt.getTime()) ? null : repairSchoolTxDate(createdAt, now);
   }
   if (typeof createdAt === "number") {
-    const d = new Date(createdAt);
-    return Number.isNaN(d.getTime()) ? null : d;
+    // Heuristic: seconds vs milliseconds
+    const ms = createdAt < 1_000_000_000_000 ? createdAt * 1000 : createdAt;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : repairSchoolTxDate(d, now);
   }
   const d = new Date(createdAt);
-  return Number.isNaN(d.getTime()) ? null : d;
+  return Number.isNaN(d.getTime()) ? null : repairSchoolTxDate(d, now);
 }
 
 function startOfDay(d: Date): Date {
@@ -80,17 +141,48 @@ function endOfDay(d: Date): Date {
 export function inDateRange(
   createdAt: string | Date | number | undefined,
   start?: Date | null,
-  end?: Date | null
+  end?: Date | null,
+  now = new Date()
 ): boolean {
   if (!start && !end) return true;
 
-  const date = parseSchoolTxDate(createdAt);
-  // Match cashier: unknown dates still count in the active period
+  const date = parseSchoolTxDate(createdAt, now);
   if (!date) return true;
 
   if (start && date < startOfDay(start)) return false;
   if (end && date > endOfDay(end)) return false;
   return true;
+}
+
+function matchesSchoolTerm(tx: SchoolPaymentTx, term: SchoolTermInfo): boolean {
+  const tid = String(tx.schoolTermId ?? "");
+  if (tid === term.id || tid.endsWith(`-${term.termKey}`)) return true;
+
+  const label = String(tx.schoolTermLabel ?? "").toLowerCase();
+  const termNum = term.termKey.replace("T", "");
+  if (label.includes(term.termKey.toLowerCase()) || label.includes(`term ${termNum}`)) {
+    return true;
+  }
+  return false;
+}
+
+export function schoolPaymentMatchesPeriod(
+  tx: SchoolPaymentTx,
+  period: SchoolPeriod,
+  start?: Date | null,
+  end?: Date | null,
+  now = new Date()
+): boolean {
+  if (period === "all" || (!start && !end)) return true;
+
+  if (period === "term") {
+    const term = getCurrentSchoolTerm(end ?? now);
+    if (matchesSchoolTerm(tx, term)) return true;
+    if (inDateRange(tx.createdAt, term.start, term.end, now)) return true;
+    return false;
+  }
+
+  return inDateRange(tx.createdAt, start, end, now);
 }
 
 export function normalizeSchoolPaymentTx(tx: SchoolPaymentTx): SchoolPaymentTx {
@@ -106,7 +198,8 @@ export function normalizeSchoolPaymentTx(tx: SchoolPaymentTx): SchoolPaymentTx {
 export function aggregateSchoolPayments(
   txs: SchoolPaymentTx[],
   start?: Date | null,
-  end?: Date | null
+  end?: Date | null,
+  period: SchoolPeriod = start || end ? "month" : "all"
 ): SchoolFeeAggregates {
   const result: SchoolFeeAggregates = {
     total: 0,
@@ -120,7 +213,7 @@ export function aggregateSchoolPayments(
   for (const raw of txs) {
     const tx = normalizeSchoolPaymentTx(raw);
     if (!isSchoolCollectionTx(tx)) continue;
-    if (!inDateRange(tx.createdAt, start, end)) continue;
+    if (!schoolPaymentMatchesPeriod(tx, period, start, end)) continue;
 
     const signed = signedSchoolAmount(tx);
     result.total += signed;

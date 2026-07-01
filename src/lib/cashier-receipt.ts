@@ -57,11 +57,16 @@ export function enrichSchoolFeeSnapshot(tx: CashierReceiptSource): CashierReceip
   let paid = Number(tx.termFeesPaid ?? 0);
   let remaining = Number(tx.termFeesRemaining ?? 0);
 
-  // Pre-payment snapshots satisfy paid + remaining ≈ total (current payment not yet applied).
-  const looksPrePayment =
-    Math.abs(paid + remaining - total) < 0.02 && remaining >= paymentAmount - 0.02;
+  const snapshotBalanced = Math.abs(paid + remaining - total) < 0.02;
+  if (!snapshotBalanced) return tx;
 
-  if (looksPrePayment) {
+  // Post-payment rows already include this sale in termFeesPaid (Rust additional_payment).
+  const priorPaid = paid - paymentAmount;
+  const looksPostPayment =
+    paid >= paymentAmount - 0.02 &&
+    Math.abs(priorPaid + remaining - (total - paymentAmount)) < 0.02;
+
+  if (!looksPostPayment) {
     paid += paymentAmount;
     remaining = Math.max(0, total - paid);
   }

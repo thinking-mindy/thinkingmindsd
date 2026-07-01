@@ -854,11 +854,10 @@ pub fn get_school_dashboard_stats(
         })
         .collect::<Vec<_>>();
 
-    let month_start_ms = month_start_ms(now_ms());
-    let month_end_ms = now_ms();
+    let current_term = crate::school::school_term::get_school_term_for_ms(now_ms());
     let fees_this_month = payments
         .iter()
-        .filter(|p| in_date_range(p, "createdAt", Some(month_start_ms), Some(month_end_ms)))
+        .filter(|p| crate::school::school_term::transaction_in_term(p, &current_term))
         .fold(0.0_f64, |acc, p| acc + p.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0).abs());
 
     action_ok(json!({
